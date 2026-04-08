@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{gpu::GpuContext, light::Light, pipeline::PipelineBuilder};
+use crate::{camera::Camera, gpu::GpuContext, light::Light, pipeline::PipelineBuilder};
 
 // ── Vertex layout ────────────────────────────────────────────────────────────
 
@@ -46,10 +46,16 @@ struct LightUniform {
 }
 @group(0) @binding(0) var<uniform> light: LightUniform;
 
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    position:  vec3<f32>,
+}
+@group(1) @binding(0) var<uniform> camera: CameraUniform;
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position  = vec4<f32>(in.position, 1.0);
+    out.clip_position  = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.world_position = in.position;
     out.normal         = in.normal;
     out.color          = in.color;
@@ -58,27 +64,29 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Derive the true per-face normal from screen-space position derivatives.
-    // This reacts instantly to any geometric change with no vertex-level blurring.
-    let n = normalize(cross(dpdy(in.world_position), dpdx(in.world_position)));
+    let n = normalize(in.normal);
     let light_dir = normalize(light.position - in.world_position);
     let ambient = 0.04;
     // Square the diffuse to push the contrast toward bright faces
     let d       = max(dot(n, light_dir), 0.0) * 2.0;
     let diffuse = d * d;
 
-    // Blinn-Phong specular — camera at +Z infinity
-    let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+    // Blinn-Phong specular — use actual camera position
+    let view_dir = normalize(camera.position - in.world_position);
     let half_dir = normalize(light_dir + view_dir);
     let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.8;
 
     let lit = in.color * (ambient + diffuse) + vec3<f32>(specular);
-    return vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    // return vec4<f32>(normalize(in.normal), 1.0);
+    // return vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
 }
 "#;
 
 // ── Math helpers ─────────────────────────────────────────────────────────────
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
+}
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
@@ -97,15 +105,26 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     if len > 1e-8 { [v[0]/len, v[1]/len, v[2]/len] } else { [0.0, 0.0, 1.0] }
 }
 
-fn vertex_normal(positions: &[[f32; 3]], n: usize, row: usize, col: usize) -> [f32; 3] {
-    let get = |r: usize, c: usize| positions[r * n + c];
-    let r0 = row.saturating_sub(1);
-    let r1 = (row + 1).min(n - 1);
-    let c0 = col.saturating_sub(1);
-    let c1 = (col + 1).min(n - 1);
-    let dx = sub(get(row, c1), get(row, c0));
-    let dy = sub(get(r1, col), get(r0, col));
-    normalize(cross(dx, dy))
+/// Computes vertex normals as the area-weighted average of adjacent face normals.
+/// Each face normal is the (unnormalized) cross product of its edges, whose magnitude
+/// equals twice the triangle area, giving natural area weighting when accumulated.
+fn compute_vertex_normals(positions: &[[f32; 3]], n: usize) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f32; 3]; n * n];
+    for row in 0..(n - 1) {
+        for col in 0..(n - 1) {
+            let tl = row * n + col;
+            let tr = tl + 1;
+            let bl = (row + 1) * n + col;
+            let br = bl + 1;
+            // Triangle 1: tl, tr, br
+            let fn1 = cross(sub(positions[tr], positions[tl]), sub(positions[br], positions[tl]));
+            // Triangle 2: tl, br, bl
+            let fn2 = cross(sub(positions[br], positions[tl]), sub(positions[bl], positions[tl]));
+            for &vi in &[tl, tr, br] { normals[vi] = add(normals[vi], fn1); }
+            for &vi in &[tl, br, bl] { normals[vi] = add(normals[vi], fn2); }
+        }
+    }
+    normals.into_iter().map(normalize).collect()
 }
 
 // ── Grid color ────────────────────────────────────────────────────────────────
@@ -175,10 +194,25 @@ impl Cloth {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        let camera_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Cloth Camera BGL placeholder"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Cloth Pipeline")
             .shader(SHADER)
             .bind_group_layout(&light.bind_group_layout)
+            .bind_group_layout(&camera_bgl)
             .vertex_layout(Vertex::LAYOUT)
             .build();
 
@@ -189,19 +223,16 @@ impl Cloth {
     /// Call after any simulation step.
     pub fn upload(&self, ctx: &GpuContext) {
         let n = self.resolution as usize;
+        let normals = compute_vertex_normals(&self.positions, n);
         let vertices: Vec<Vertex> = self.positions.iter().enumerate().map(|(i, &position)| {
             let row = i / n;
             let col = i % n;
-            Vertex {
-                position,
-                normal: vertex_normal(&self.positions, n, row, col),
-                color: grid_color(row, col),
-            }
+            Vertex { position, normal: normals[i], color: grid_color(row, col) }
         }).collect();
         ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
     }
 
-    pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light) {
+    pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
         let mut encoder = ctx.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Cloth Encoder") },
         );
@@ -224,6 +255,7 @@ impl Cloth {
             });
             rpass.set_pipeline(&self.pipeline);
             rpass.set_bind_group(0, &light.bind_group, &[]);
+            rpass.set_bind_group(1, &camera.bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..self.index_count, 0, 0..1);
