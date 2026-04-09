@@ -73,7 +73,11 @@ function buildPanel() {
   document.body.appendChild(panel)
 }
 
-init().then(() => {
-  run('canvas')
+init().then(async () => {
+  try {
+    await run('canvas')
+  } catch (e) {
+    console.error('WASM run() failed:', e)
+  }
   buildPanel()
 })

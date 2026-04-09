@@ -40,6 +40,7 @@ struct AppState {
 
 #[wasm_bindgen]
 pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
     let window = web_sys::window().unwrap();
     let canvas = window
         .document().unwrap()

@@ -41,7 +41,8 @@ impl GpuContext {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
+        let format = caps.formats.first().copied()
+            .ok_or_else(|| JsValue::from_str("No supported surface formats"))?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
