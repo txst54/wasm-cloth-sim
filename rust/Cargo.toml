@@ -19,7 +19,12 @@ web-sys = { version = "0.3", features = [
     "MouseEvent",
     "KeyboardEvent",
     "EventTarget",
-    "Gpu"
+    "Gpu",
+    "TouchEvent",
+    "TouchList",
+    "Touch",
+    "DomRect",
+    "Element"
 ] }
 wgpu = "29.0.1"
 bytemuck = { version = "1", features = ["derive"] }

@@ -13,7 +13,7 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent};
+use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent, TouchEvent};
 
 use camera::Camera;
 use cloth::Cloth;
@@ -127,6 +127,76 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     }));
     canvas.add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())?;
     mouseup.forget();
+
+    // Convert a Touch's client coordinates to NDC [-1, 1] relative to the canvas.
+    fn to_ndc_touch(touch: &web_sys::Touch, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let rect = canvas.get_bounding_client_rect();
+        let ox = touch.client_x() as f32 - rect.left() as f32;
+        let oy = touch.client_y() as f32 - rect.top()  as f32;
+        let w  = rect.width()  as f32;
+        let h  = rect.height() as f32;
+        let nx =  (ox / w) * 2.0 - 1.0;
+        let ny = -(oy / h) * 2.0 + 1.0;
+        (nx, ny)
+    }
+
+    // touchstart — same as mousedown
+    let state_ts = state.clone();
+    let touchstart = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_ts.borrow_mut();
+        let (nx, ny) = to_ndc_touch(&touch, &s.canvas);
+
+        let mut best_idx  = 0usize;
+        let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i, 0)], s.sim.q[(i, 1)], s.sim.q[(i, 2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let dx = px - nx;
+            let dy = py - ny;
+            let d2 = dx * dx + dy * dy;
+            if d2 < best_dist {
+                best_dist = d2;
+                best_idx  = i;
+            }
+        }
+        let vertex_world = [
+            s.sim.q[(best_idx, 0)],
+            s.sim.q[(best_idx, 1)],
+            s.sim.q[(best_idx, 2)],
+        ];
+        s.sim.clicked_vertex = Some(best_idx);
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vertex_world, &s.camera)
+            .unwrap_or(vertex_world);
+    }));
+    canvas.add_event_listener_with_callback("touchstart", touchstart.as_ref().unchecked_ref())?;
+    touchstart.forget();
+
+    // touchmove — same as mousemove
+    let state_tm = state.clone();
+    let touchmove = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_tm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc_touch(&touch, &s.canvas);
+            let current_pos = [s.sim.q[(v, 0)], s.sim.q[(v, 1)], s.sim.q[(v, 2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, current_pos, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("touchmove", touchmove.as_ref().unchecked_ref())?;
+    touchmove.forget();
+
+    // touchend — same as mouseup
+    let state_te = state.clone();
+    let touchend = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |_: TouchEvent| {
+        state_te.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("touchend", touchend.as_ref().unchecked_ref())?;
+    touchend.forget();
 
     // keydown — record arrow key press and suppress page scroll
     let state_kd = state.clone();
