@@ -66,17 +66,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let light_dir = normalize(light.position - in.world_position);
-    let ambient = 0.04;
-    // Square the diffuse to push the contrast toward bright faces
-    let d       = max(dot(n, light_dir), 0.0) * 2.0;
-    let diffuse = d * d;
+    let ambient = 0.15;
+    let diffuse       = max(dot(n, light_dir), 0.0);
 
     // Blinn-Phong specular — use actual camera position
     let view_dir = normalize(camera.position - in.world_position);
     let half_dir = normalize(light_dir + view_dir);
-    let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.8;
+    let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.5;
 
-    let lit = in.color * (ambient + diffuse) + vec3<f32>(specular);
+    let lit = in.color * (ambient + diffuse * 0.85) + vec3<f32>(specular);
     // return vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
 }

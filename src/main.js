@@ -1,4 +1,79 @@
 import './style.css'
-import init, { run } from '../rust/pkg/my_webgpu_app.js'
+import init, {
+  run,
+  set_time_step,
+  set_constraint_iters,
+  set_gravity_enabled,
+  set_gravity_g,
+  set_pin_enabled,
+  set_pin_weight,
+  set_stretch_enabled,
+  set_stretch_weight,
+  set_bending_enabled,
+  set_bending_weight,
+  set_pulling_enabled,
+  set_pulling_weight,
+} from '../rust/pkg/my_webgpu_app.js'
+import { SliderRow, ConstraintGroup, Divider } from './components.js'
 
-init().then(() => run('canvas'))
+function buildPanel() {
+  const panel = document.createElement('div')
+  panel.className = 'fixed top-4 left-4 z-10 bg-black/75 backdrop-blur-sm text-white rounded-xl p-4 w-60 text-xs font-mono select-none overflow-y-auto max-h-[calc(100vh-2rem)]'
+
+  const title = document.createElement('div')
+  title.className = 'text-sm font-bold mb-3 text-white/90 tracking-wide'
+  title.textContent = 'Sim Params'
+  panel.appendChild(title)
+
+  panel.appendChild(SliderRow({
+    label: 'time step', min: 0.001, max: 0.1, step: 0.001, value: 0.01,
+    onChange: set_time_step,
+  }))
+  panel.appendChild(SliderRow({
+    label: 'iterations', min: 1, max: 30, step: 1, value: 5,
+    onChange: v => set_constraint_iters(Math.round(v)),
+  }))
+
+  panel.appendChild(Divider())
+
+  panel.appendChild(ConstraintGroup({
+    label: 'gravity', enabled: true,
+    weight: -9.8, weightMin: -20, weightMax: 0, weightStep: 0.1,
+    onToggle: set_gravity_enabled,
+    onWeightChange: set_gravity_g,
+  }))
+
+  panel.appendChild(Divider())
+
+  panel.appendChild(ConstraintGroup({
+    label: 'pin', enabled: true,
+    weight: 1.0, 
+    onToggle: set_pin_enabled,
+    onWeightChange: set_pin_weight,
+  }))
+  panel.appendChild(ConstraintGroup({
+    label: 'stretch', enabled: true,
+    weight: 0.5,
+    onToggle: set_stretch_enabled,
+    onWeightChange: set_stretch_weight,
+  }))
+  panel.appendChild(ConstraintGroup({
+    label: 'bending', enabled: true,
+    weight: 0.5,
+    onToggle: set_bending_enabled,
+    onWeightChange: set_bending_weight,
+  }))
+  panel.appendChild(ConstraintGroup({
+    label: 'pulling', enabled: true,
+    weight: 0.5,
+    onToggle: set_pulling_enabled,
+    onWeightChange: set_pulling_weight,
+  }))
+
+  document.body.appendChild(panel)
+}
+
+init().then(() => {
+  run('canvas')
+  buildPanel()
+})

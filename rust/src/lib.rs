@@ -22,13 +22,17 @@ use light::Light;
 use params::SimParams;
 use sim::ClothSim;
 
+thread_local! {
+    static PARAMS: Rc<RefCell<SimParams>> = Rc::new(RefCell::new(SimParams::default()));
+}
+
 struct AppState {
     ctx:    GpuContext,
     cloth:  Cloth,
     light:  Light,
     camera: Camera,
     sim:    ClothSim,
-    params: SimParams,
+    params: Rc<RefCell<SimParams>>,
     canvas: HtmlCanvasElement,
     /// [left, right, up, down] arrow key held state
     keys:   [bool; 4],
@@ -54,7 +58,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         light,
         camera,
         sim,
-        params: SimParams::default(),
+        params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
         keys: [false; 4],
     }));
@@ -165,7 +169,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
             camera.update(&ctx.queue);
         }
 
-        sim.step(params);
+        sim.step(&params.borrow());
         sim.write_to_cloth(cloth, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
@@ -270,6 +274,21 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
     let inv_w = 1.0 / w[3];
     [w[0] * inv_w, w[1] * inv_w, w[2] * inv_w]
 }
+
+// ── Param setters (called from JS panel) ──────────────────────────────────────
+
+#[wasm_bindgen] pub fn set_time_step(v: f64)         { PARAMS.with(|p| p.borrow_mut().time_step = v); }
+#[wasm_bindgen] pub fn set_constraint_iters(v: u32)  { PARAMS.with(|p| p.borrow_mut().constraint_iters = v); }
+#[wasm_bindgen] pub fn set_gravity_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().gravity_enabled = v); }
+#[wasm_bindgen] pub fn set_gravity_g(v: f64)         { PARAMS.with(|p| p.borrow_mut().gravity_g = v); }
+#[wasm_bindgen] pub fn set_pin_enabled(v: bool)      { PARAMS.with(|p| p.borrow_mut().pin_enabled = v); }
+#[wasm_bindgen] pub fn set_pin_weight(v: f64)        { PARAMS.with(|p| p.borrow_mut().pin_weight = v); }
+#[wasm_bindgen] pub fn set_stretch_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().stretch_enabled = v); }
+#[wasm_bindgen] pub fn set_stretch_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().stretch_weight = v); }
+#[wasm_bindgen] pub fn set_bending_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().bending_enabled = v); }
+#[wasm_bindgen] pub fn set_bending_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().bending_weight = v); }
+#[wasm_bindgen] pub fn set_pulling_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().pulling_enabled = v); }
+#[wasm_bindgen] pub fn set_pulling_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().pulling_weight = v); }
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] { [a[0]-b[0], a[1]-b[1], a[2]-b[2]] }
 fn neg3(a: [f32; 3]) -> [f32; 3] { [-a[0], -a[1], -a[2]] }
