@@ -67,6 +67,7 @@ export function ConstraintGroup({
   label,
   enabled,
   weight,
+  weightLabel = 'weight',
   weightMin = 0,
   weightMax = 1,
   weightStep = 0.05,
@@ -87,7 +88,7 @@ export function ConstraintGroup({
 
   if (weight !== undefined && onWeightChange) {
     root.appendChild(SliderRow({
-      label: 'weight',
+      label: weightLabel,
       min: weightMin,
       max: weightMax,
       step: weightStep,
@@ -97,6 +98,30 @@ export function ConstraintGroup({
     }))
   }
 
+  return root
+}
+
+/**
+ * CheckboxRow — a single labeled checkbox, optionally indented.
+ *
+ * Props:
+ *   label    {string}
+ *   checked  {boolean}  initial state
+ *   indent   {boolean}  left-indent (for sub-params, default true)
+ *   onChange {fn}       called with boolean on change
+ *
+ * Returns a <div> DOM node.
+ */
+export function CheckboxRow({ label, checked, indent = true, onChange }) {
+  const root = el('div', 'mb-1')
+  const checkLabel = el('label', `flex items-center gap-2 cursor-pointer${indent ? ' pl-4' : ''}`)
+  const checkbox = el('input', 'accent-white cursor-pointer', { type: 'checkbox' })
+  checkbox.checked = checked
+  const checkText = el('span', 'text-white/60')
+  checkText.textContent = label
+  checkLabel.append(checkbox, checkText)
+  checkbox.addEventListener('change', () => onChange(checkbox.checked))
+  root.appendChild(checkLabel)
   return root
 }
 

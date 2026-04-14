@@ -13,8 +13,13 @@ import init, {
   set_bending_weight,
   set_pulling_enabled,
   set_pulling_weight,
+  set_self_collision_enabled,
+  set_self_collision_threshold,
+  set_self_collision_recompute_pairs,
+  set_use_distance_constraints,
+  set_resolution,
 } from '../rust/pkg/my_webgpu_app.js'
-import { SliderRow, ConstraintGroup, Divider } from './components.js'
+import { SliderRow, ConstraintGroup, CheckboxRow, Divider } from './components.js'
 
 function buildPanel() {
   const panel = document.createElement('div')
@@ -45,6 +50,15 @@ function buildPanel() {
 
   panel.appendChild(Divider())
 
+  panel.appendChild(CheckboxRow({
+    label: 'distance constraints',
+    checked: false,
+    indent: false,
+    onChange: set_use_distance_constraints,
+  }))
+
+  panel.appendChild(Divider())
+
   panel.appendChild(ConstraintGroup({
     label: 'pin', enabled: true,
     weight: 1.0, 
@@ -68,6 +82,25 @@ function buildPanel() {
     weight: 0.5,
     onToggle: set_pulling_enabled,
     onWeightChange: set_pulling_weight,
+  }))
+  panel.appendChild(ConstraintGroup({
+    label: 'self collision', enabled: true,
+    weight: 0.01, weightLabel: 'threshold',
+    weightMin: 0.001, weightMax: 0.1, weightStep: 0.001,
+    onToggle: set_self_collision_enabled,
+    onWeightChange: set_self_collision_threshold,
+  }))
+  panel.appendChild(CheckboxRow({
+    label: 'recompute pairs/iter',
+    checked: false,
+    onChange: set_self_collision_recompute_pairs,
+  }))
+
+  panel.appendChild(Divider())
+
+  panel.appendChild(SliderRow({
+    label: 'resolution', min: 4, max: 128, step: 1, value: 64,
+    onChange: v => set_resolution(Math.round(v)),
   }))
 
   document.body.appendChild(panel)

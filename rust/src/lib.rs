@@ -24,6 +24,7 @@ use sim::ClothSim;
 
 thread_local! {
     static PARAMS: Rc<RefCell<SimParams>> = Rc::new(RefCell::new(SimParams::default()));
+    static APP_STATE: RefCell<Option<Rc<RefCell<AppState>>>> = RefCell::new(None);
 }
 
 struct AppState {
@@ -63,6 +64,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         canvas: canvas.clone(),
         keys: [false; 4],
     }));
+    APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
     // Convert a MouseEvent's offset coordinates to NDC [-1, 1].
     fn to_ndc(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
@@ -360,6 +362,23 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 #[wasm_bindgen] pub fn set_bending_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().bending_weight = v); }
 #[wasm_bindgen] pub fn set_pulling_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().pulling_enabled = v); }
 #[wasm_bindgen] pub fn set_pulling_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().pulling_weight = v); }
+#[wasm_bindgen] pub fn set_self_collision_enabled(v: bool)          { PARAMS.with(|p| p.borrow_mut().self_collision_enabled = v); }
+#[wasm_bindgen] pub fn set_self_collision_threshold(v: f64)         { PARAMS.with(|p| p.borrow_mut().self_collision_threshold = v); }
+#[wasm_bindgen] pub fn set_self_collision_recompute_pairs(v: bool)  { PARAMS.with(|p| p.borrow_mut().self_collision_recompute_pairs = v); }
+#[wasm_bindgen] pub fn set_use_distance_constraints(v: bool)        { PARAMS.with(|p| p.borrow_mut().use_distance_constraints = v); }
+
+#[wasm_bindgen]
+pub fn set_resolution(v: u32) {
+    APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            let new_cloth = Cloth::new(&s.ctx, v, &s.light);
+            let new_sim   = ClothSim::from_cloth(&new_cloth);
+            s.cloth = new_cloth;
+            s.sim   = new_sim;
+        }
+    });
+}
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] { [a[0]-b[0], a[1]-b[1], a[2]-b[2]] }
 fn neg3(a: [f32; 3]) -> [f32; 3] { [-a[0], -a[1], -a[2]] }
