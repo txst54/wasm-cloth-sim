@@ -101,6 +101,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
             s.sim.q[(best_idx, 2)],
         ];
         s.sim.clicked_vertex = Some(best_idx);
+        s.sim.dragging_vertices = None;
         s.sim.mouse_pos = ray_plane_intersect(nx, ny, vertex_world, &s.camera)
             .unwrap_or(vertex_world);
     }));
@@ -366,6 +367,7 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 #[wasm_bindgen] pub fn set_self_collision_threshold(v: f64)         { PARAMS.with(|p| p.borrow_mut().self_collision_threshold = v); }
 #[wasm_bindgen] pub fn set_self_collision_recompute_pairs(v: bool)  { PARAMS.with(|p| p.borrow_mut().self_collision_recompute_pairs = v); }
 #[wasm_bindgen] pub fn set_use_distance_constraints(v: bool)        { PARAMS.with(|p| p.borrow_mut().use_distance_constraints = v); }
+#[wasm_bindgen] pub fn set_pulling_area(v: u32)    { PARAMS.with(|p| p.borrow_mut().pulling_area = v); }
 
 #[wasm_bindgen]
 pub fn set_resolution(v: u32) {

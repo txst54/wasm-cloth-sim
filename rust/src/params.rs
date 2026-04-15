@@ -16,6 +16,7 @@ pub struct SimParams {
 
     pub pulling_enabled:   bool,
     pub pulling_weight:    f64,
+    pub pulling_area:     u32,
 
     pub self_collision_enabled:   bool,
     /// Distance (world units) below which a vertex is considered in contact with a triangle.
@@ -50,6 +51,7 @@ impl Default for SimParams {
 
             pulling_enabled:  true,
             pulling_weight:   0.5,
+            pulling_area:     1,
 
             self_collision_enabled:   true,
             self_collision_threshold: 0.02,

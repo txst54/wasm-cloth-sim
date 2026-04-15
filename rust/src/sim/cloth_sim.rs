@@ -292,6 +292,12 @@ pub fn closest_point_on_triangle(
     a + v * ab + w * ac
 }
 
+pub struct DragInfluence {
+    vi: usize,
+    alpha: f32,
+    offset: na::Vector3<f32>,
+}
+
 pub struct ClothSim {
     /// Current positions, Nx3.
     pub q: Positions,
@@ -320,10 +326,12 @@ pub struct ClothSim {
     pub diamond_rest_diag: Vec<f32>,
     /// Index of the vertex currently being dragged, if any.
     pub clicked_vertex: Option<usize>,
+    pub dragging_vertices: Option<Vec<DragInfluence>>,
     /// Target position for the dragged vertex in clip space.
     pub mouse_pos: [f32; 3],
     /// Spatial hash over triangles, rebuilt each frame after constraint projection.
     pub triangle_hash: TriangleSpatialHash,
+
 }
 
 impl ClothSim {
@@ -385,6 +393,7 @@ impl ClothSim {
             q, q_rest, q_prev, v, w, faces, diamonds, vertex_neighbors,
             edges, edge_rest_lengths, diamond_rest_diag,
             clicked_vertex: None,
+            dragging_vertices: None,
             mouse_pos: [0.0; 3],
             triangle_hash,
         }
@@ -404,6 +413,11 @@ impl ClothSim {
                 }
             }
         }
+
+        if let Some(v) = self.clicked_vertex {
+            self.dragging_vertices = Some(self.build_drag_influences(v, params.pulling_area as usize));
+        }
+
 
         for i in 0..n {
             if self.w[i] > 0.0 {
@@ -477,11 +491,18 @@ impl ClothSim {
 
             if params.pulling_enabled {
                 if let Some(v) = self.clicked_vertex {
-                    let w = params.pulling_weight as f32;
                     let mp = na::Vector3::new(self.mouse_pos[0], self.mouse_pos[1], self.mouse_pos[2]);
-                    let qi = self.q.row(v).transpose();
-                    let updated = (1.0 - w) * qi + w * mp;
-                    self.q.row_mut(v).copy_from(&updated.transpose());
+                    let base = params.pulling_weight as f32;
+
+                    if let Some(verts) = &self.dragging_vertices {
+                        for inf in verts {
+                            let target = mp + inf.offset;
+                            let qi = self.q.row(inf.vi).transpose();
+                            let w = base * inf.alpha;
+                            let updated = (1.0 - w) * qi + w * target;
+                            self.q.row_mut(inf.vi).copy_from(&updated.transpose());
+                        }
+                    }
                 }
             }
 
@@ -569,14 +590,27 @@ impl ClothSim {
         let t2 = threshold * threshold;
 
         for vi in 0..self.q.nrows() {
-            let px = self.q[(vi, 0)];
-            let py = self.q[(vi, 1)];
-            let pz = self.q[(vi, 2)];
+            let px0 = self.q_prev[(vi, 0)];
+            let py0 = self.q_prev[(vi, 1)];
+            let pz0 = self.q_prev[(vi, 2)];
 
-            let candidates = self.triangle_hash.query_aabb(
-                [px - threshold, py - threshold, pz - threshold],
-                [px + threshold, py + threshold, pz + threshold],
-            );
+            let px1 = self.q[(vi, 0)];
+            let py1 = self.q[(vi, 1)];
+            let pz1 = self.q[(vi, 2)];
+
+            let min = [
+                px0.min(px1) - threshold,
+                py0.min(py1) - threshold,
+                pz0.min(pz1) - threshold,
+            ];
+
+            let max = [
+                px0.max(px1) + threshold,
+                py0.max(py1) + threshold,
+                pz0.max(pz1) + threshold,
+            ];
+
+            let candidates = self.triangle_hash.query_aabb(min, max);
 
             for fi in candidates {
                 let i0 = self.faces[(fi as usize, 0)] as usize;
@@ -598,6 +632,61 @@ impl ClothSim {
         }
 
         pairs
+    }
+
+    pub fn build_drag_influences(
+        &self,
+        center: usize,
+        max_hops: usize,
+    ) -> Vec<DragInfluence> {
+        use std::collections::VecDeque;
+
+        let center_pos = self.q.row(center).transpose();
+        let mut dist = vec![usize::MAX; self.q.nrows()];
+        let mut q = VecDeque::new();
+
+        dist[center] = 0;
+        q.push_back(center);
+
+        let mut out = Vec::new();
+
+        while let Some(v) = q.pop_front() {
+            let d = dist[v];
+            if d > max_hops {
+                continue;
+            }
+
+            let alpha = match d {
+                0 => 1.0,
+                1 => 0.6,
+                2 => 0.25,
+                3 => 0.08,
+                _ => 0.0,
+            };
+
+            if alpha > 0.0 {
+                let pos = self.q.row(v).transpose();
+                out.push(DragInfluence {
+                    vi: v,
+                    alpha,
+                    offset: pos - center_pos,
+                });
+            }
+
+            if d == max_hops {
+                continue;
+            }
+
+            for &nb in &self.vertex_neighbors[v] {
+                let nb = nb as usize;
+                if dist[nb] == usize::MAX {
+                    dist[nb] = d + 1;
+                    q.push_back(nb);
+                }
+            }
+        }
+
+        out
     }
 
     /// Copy `q` back into `cloth.positions` and upload to the GPU.
