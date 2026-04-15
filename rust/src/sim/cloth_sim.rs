@@ -234,6 +234,10 @@ fn apply_distance_constraint(
     }
 }
 
+fn gaussian_weight(d: f32, sigma: f32) -> f32 {
+    (- (d * d) / (2.0 * sigma * sigma)).exp()
+}
+
 // ── Closest point on triangle ─────────────────────────────────────────────────
 
 /// Returns the closest point on triangle (a, b, c) to point p.
@@ -656,13 +660,7 @@ impl ClothSim {
                 continue;
             }
 
-            let alpha = match d {
-                0 => 1.0,
-                1 => 0.6,
-                2 => 0.25,
-                3 => 0.08,
-                _ => 0.0,
-            };
+            let alpha = gaussian_weight(d as f32, 2.0);
 
             if alpha > 0.0 {
                 let pos = self.q.row(v).transpose();

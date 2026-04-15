@@ -115,15 +115,17 @@ function buildPanel() {
     onToggle: set_pulling_enabled,
     sliders: [
       new SliderOptions({
-        weight: 0.5,
+        weight: 0.1,
+        weightStep: 0.02,
+        weightMax: 0.5,
         weightLabel: "Pulling Weight",
         onWeightChange: set_pulling_weight,
       }),
       new SliderOptions({
-        weight: 1,
+        weight: 5,
         weightStep: 1,
         weightMin: 0,
-        weightMax: 4,
+        weightMax: 20,
         weightLabel: "Pulling Area",
         onWeightChange: set_pulling_area,
       }),

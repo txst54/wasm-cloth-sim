@@ -50,8 +50,8 @@ impl Default for SimParams {
             bending_weight:   0.5,
 
             pulling_enabled:  true,
-            pulling_weight:   0.5,
-            pulling_area:     1,
+            pulling_weight:   0.1,
+            pulling_area:     5,
 
             self_collision_enabled:   true,
             self_collision_threshold: 0.02,
