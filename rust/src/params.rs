@@ -29,6 +29,9 @@ pub struct SimParams {
     /// When true, stretch and bending use per-edge distance constraints (fast, O(E)).
     /// When false, they use shape-matching with SVD polar decomposition (slower, higher quality).
     pub use_distance_constraints: bool,
+    /// Velocity damping applied after each step: v *= (1 - damping).
+    /// 0.0 = no damping (default); 0.05 = 5% reduction per step.
+    pub damping: f64,
 }
 
 impl Default for SimParams {
@@ -57,6 +60,7 @@ impl Default for SimParams {
             self_collision_threshold: 0.02,
             self_collision_recompute_pairs: false,
             use_distance_constraints: false,
+            damping: 0.0,
         }
     }
 }
