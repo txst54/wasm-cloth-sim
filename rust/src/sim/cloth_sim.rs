@@ -41,7 +41,7 @@ impl TriangleSpatialHash {
     }
 
     /// Recompute the hash from the current cloth positions. Called every frame.
-    pub fn rebuild(&mut self, q: &Positions, faces: &Faces) {
+    pub fn rebuild(&mut self, q: &Positions, q_prev: &Positions, faces: &Faces) {
         self.cells.clear();
 
         let m = faces.nrows();
@@ -50,12 +50,19 @@ impl TriangleSpatialHash {
             let v1 = faces[(fi, 1)] as usize;
             let v2 = faces[(fi, 2)] as usize;
 
-            let min_x = q[(v0, 0)].min(q[(v1, 0)]).min(q[(v2, 0)]);
-            let min_y = q[(v0, 1)].min(q[(v1, 1)]).min(q[(v2, 1)]);
-            let min_z = q[(v0, 2)].min(q[(v1, 2)]).min(q[(v2, 2)]);
-            let max_x = q[(v0, 0)].max(q[(v1, 0)]).max(q[(v2, 0)]);
-            let max_y = q[(v0, 1)].max(q[(v1, 1)]).max(q[(v2, 1)]);
-            let max_z = q[(v0, 2)].max(q[(v1, 2)]).max(q[(v2, 2)]);
+            let min_x = q[(v0, 0)].min(q[(v1, 0)]).min(q[(v2, 0)])
+                .min(q_prev[(v0, 0)]).min(q_prev[(v1, 0)]).min(q_prev[(v2, 0)]);
+            let min_y = q[(v0, 1)].min(q[(v1, 1)]).min(q[(v2, 1)])
+                .min(q_prev[(v0, 1)]).min(q_prev[(v1, 1)]).min(q_prev[(v2, 1)]);
+            let min_z = q[(v0, 2)].min(q[(v1, 2)]).min(q[(v2, 2)])
+                .min(q_prev[(v0, 2)]).min(q_prev[(v1, 2)]).min(q_prev[(v2, 2)]);
+
+            let max_x = q[(v0, 0)].max(q[(v1, 0)]).max(q[(v2, 0)])
+                .max(q_prev[(v0, 0)]).max(q_prev[(v1, 0)]).max(q_prev[(v2, 0)]);
+            let max_y = q[(v0, 1)].max(q[(v1, 1)]).max(q[(v2, 1)])
+                .max(q_prev[(v0, 1)]).max(q_prev[(v1, 1)]).max(q_prev[(v2, 1)]);
+            let max_z = q[(v0, 2)].max(q[(v1, 2)]).max(q[(v2, 2)])
+                .max(q_prev[(v0, 2)]).max(q_prev[(v1, 2)]).max(q_prev[(v2, 2)]);
 
             let (cx0, cy0, cz0) = self.cell_of(min_x, min_y, min_z);
             let (cx1, cy1, cz1) = self.cell_of(max_x, max_y, max_z);
@@ -238,6 +245,142 @@ fn gaussian_weight(d: f32, sigma: f32) -> f32 {
     (- (d * d) / (2.0 * sigma * sigma)).exp()
 }
 
+/// Evaluate the cubic f(t) = (p(t) - a(t)) · [(b(t) - a(t)) × (c(t) - a(t))]
+/// which is zero when p, a, b, c are coplanar.
+/// All positions are linearly interpolated from prev to curr.
+#[inline]
+fn coplanarity(
+    p0: na::Vector3<f32>, p1: na::Vector3<f32>, // vertex
+    a0: na::Vector3<f32>, a1: na::Vector3<f32>, // triangle verts
+    b0: na::Vector3<f32>, b1: na::Vector3<f32>,
+    c0: na::Vector3<f32>, c1: na::Vector3<f32>,
+    t: f32,
+) -> f32 {
+    let p = p0 + t * (p1 - p0);
+    let a = a0 + t * (a1 - a0);
+    let b = b0 + t * (b1 - b0);
+    let c = c0 + t * (c1 - c0);
+    (p - a).dot(&((b - a).cross(&(c - a))))
+}
+
+/// Find the earliest t in [t0, t1] where f(t) = 0, using derivative roots
+/// to subdivide into monotone intervals then bisecting each.
+/// Returns None if no root exists in the interval.
+fn find_earliest_root(
+    f: impl Fn(f32) -> f32,
+    df: impl Fn(f32) -> f32,
+    t0: f32,
+    t1: f32,
+    tol: f32,
+) -> Option<f32> {
+    // Find the two roots of the derivative (quadratic) to get monotone sub-intervals.
+    // We sample df at a few points to find sign changes as a simple robust fallback.
+    // For a true cubic, df is quadratic — solve it analytically via the quadratic formula
+    // applied to sampled coefficients. Here we use interval subdivision for robustness.
+    let n_intervals = 8; // subdivide [t0,t1] to find sign changes of f
+    let step = (t1 - t0) / n_intervals as f32;
+
+    let mut earliest: Option<f32> = None;
+
+    let mut fa = f(t0);
+    for i in 0..n_intervals {
+        let ta = t0 + i as f32 * step;
+        let tb = ta + step;
+        let fb = f(tb);
+
+        if fa * fb <= 0.0 {
+            // Sign change — bisect to find root.
+            let mut lo = ta;
+            let mut hi = tb;
+            let mut flo = fa;
+            for _ in 0..32 {
+                if (hi - lo) < tol { break; }
+                let mid = (lo + hi) * 0.5;
+                let fmid = f(mid);
+                if flo * fmid <= 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    flo = fmid;
+                }
+            }
+            let root = (lo + hi) * 0.5;
+            if earliest.map_or(true, |e| root < e) {
+                earliest = Some(root);
+            }
+            // We want the earliest root so stop after finding one
+            // (intervals are ordered left to right).
+            break;
+        }
+
+        fa = fb;
+    }
+
+    earliest
+}
+
+/// Returns barycentric coords (u, v, w) of point p projected onto plane of triangle (a,b,c).
+/// Returns None if p is outside the triangle.
+fn barycentric_in_triangle(
+    p: na::Vector3<f32>,
+    a: na::Vector3<f32>,
+    b: na::Vector3<f32>,
+    c: na::Vector3<f32>,
+) -> Option<(f32, f32, f32)> {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let n = ab.cross(&ac);
+    let denom = n.dot(&n);
+    if denom < 1e-12 { return None; } // degenerate triangle
+
+    let u = n.dot(&(ab.cross(&ap))) / denom; // weight for c... wait, let's be explicit:
+    // Standard: p = a*wa + b*wb + c*wc
+    let wc = n.dot(&(ab.cross(&ap))) / denom;
+    let wb = n.dot(&(ap.cross(&ac))) / denom;
+    let wa = 1.0 - wb - wc;
+
+    if wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4 {
+        Some((wa, wb, wc))
+    } else {
+        None
+    }
+}
+
+/// CCD vertex-triangle test.
+/// Returns Some((t, wa, wb, wc)) — collision time and barycentric coords at t —
+/// or None if no collision occurs in [0, 1].
+pub fn ccd_vertex_triangle(
+    p0: na::Vector3<f32>, p1: na::Vector3<f32>,
+    a0: na::Vector3<f32>, a1: na::Vector3<f32>,
+    b0: na::Vector3<f32>, b1: na::Vector3<f32>,
+    c0: na::Vector3<f32>, c1: na::Vector3<f32>,
+    thickness: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let f  = |t: f32| coplanarity(p0, p1, a0, a1, b0, b1, c0, c1, t);
+    let df = |t: f32| {
+        let eps = 1e-5;
+        (f(t + eps) - f(t - eps)) / (2.0 * eps)
+    };
+
+    let t_coplanar = find_earliest_root(f, df, 0.0, 1.0, 1e-6)?;
+
+    // At t_coplanar, check if p is actually inside the triangle.
+    let p = p0 + t_coplanar * (p1 - p0);
+    let a = a0 + t_coplanar * (a1 - a0);
+    let b = b0 + t_coplanar * (b1 - b0);
+    let c = c0 + t_coplanar * (c1 - c0);
+
+    // Also enforce thickness — reject if they never get within thickness distance.
+    let closest = closest_point_on_triangle(p, a, b, c);
+    if (p - closest).norm() > thickness * 2.0 {
+        return None;
+    }
+
+    barycentric_in_triangle(p, a, b, c)
+        .map(|(wa, wb, wc)| (t_coplanar, wa, wb, wc))
+}
+
 // ── Closest point on triangle ─────────────────────────────────────────────────
 
 /// Returns the closest point on triangle (a, b, c) to point p.
@@ -391,7 +534,7 @@ impl ClothSim {
         // Cell size ≈ 2× rest edge so each triangle spans ~1 cell on average.
         let cell_size = 3.6 / (n as f32 - 1.0);
         let mut triangle_hash = TriangleSpatialHash::new(cell_size);
-        triangle_hash.rebuild(&q, &faces);
+        triangle_hash.rebuild(&q, &q_prev, &faces);
 
         Self {
             q, q_rest, q_prev, v, w, faces, diamonds, vertex_neighbors,
@@ -407,6 +550,7 @@ impl ClothSim {
         let dt = params.time_step as f32;
         let n  = self.q.nrows();
 
+        // ── 1. Save state, apply forces, integrate ────────────────────────────
         self.q_prev.copy_from(&self.q);
 
         if params.gravity_enabled {
@@ -422,7 +566,6 @@ impl ClothSim {
             self.dragging_vertices = Some(self.build_drag_influences(v, params.pulling_area as usize));
         }
 
-
         for i in 0..n {
             if self.w[i] > 0.0 {
                 self.q[(i, 0)] += self.v[(i, 0)] * dt;
@@ -431,17 +574,7 @@ impl ClothSim {
             }
         }
 
-        // Broad-phase self-collision pairs from predicted positions.
-        // If recompute_pairs is false, pairs are built once here and reused each
-        // constraint iteration (faster, may miss collisions formed during projection).
-        // If recompute_pairs is true, pairs are rebuilt inside the loop (more accurate).
-        let sc_pairs_initial = if params.self_collision_enabled && !params.self_collision_recompute_pairs {
-            self.triangle_hash.rebuild(&self.q, &self.faces);
-            self.close_vertex_triangle_pairs(params.self_collision_threshold as f32)
-        } else {
-            Vec::new()
-        };
-
+        // ── 2. Constraint loop (no collision detection here) ──────────────────
         for _ in 0..params.constraint_iters {
             if params.stretch_enabled {
                 let sw = params.stretch_weight as f32;
@@ -479,7 +612,7 @@ impl ClothSim {
                     }
                 } else {
                     for di in 0..self.diamonds.len() {
-                        let idx = self.diamonds[di]; // [u32;4] is Copy
+                        let idx = self.diamonds[di];
                         apply_constraint(&mut self.q, &self.q_rest, &idx, bw);
                     }
                 }
@@ -494,10 +627,9 @@ impl ClothSim {
             }
 
             if params.pulling_enabled {
-                if let Some(v) = self.clicked_vertex {
+                if let Some(_) = self.clicked_vertex {
                     let mp = na::Vector3::new(self.mouse_pos[0], self.mouse_pos[1], self.mouse_pos[2]);
                     let base = params.pulling_weight as f32;
-
                     if let Some(verts) = &self.dragging_vertices {
                         for inf in verts {
                             let target = mp + inf.offset;
@@ -509,72 +641,90 @@ impl ClothSim {
                     }
                 }
             }
+        }
 
-            if params.self_collision_enabled {
-                let threshold = params.self_collision_threshold as f32;
-                let t2 = threshold * threshold;
+        // ── 3. CCD self-collision pass ────────────────────────────────────────────
+        if params.self_collision_enabled {
+            let threshold = params.self_collision_threshold as f32;
 
-                // Recompute pairs each iteration if requested; otherwise use initial set.
-                let iter_pairs: Vec<(usize, u32)>;
-                let sc_pairs: &[(usize, u32)] = if params.self_collision_recompute_pairs {
-                    self.triangle_hash.rebuild(&self.q, &self.faces);
-                    iter_pairs = self.close_vertex_triangle_pairs(threshold);
-                    &iter_pairs
-                } else {
-                    &sc_pairs_initial
-                };
+            self.triangle_hash.rebuild(&self.q, &self.q_prev, &self.faces);
+            let sc_pairs = self.close_vertex_triangle_pairs(threshold);
 
-                for &(vi, fi) in sc_pairs {
-                    let i0 = self.faces[(fi as usize, 0)] as usize;
-                    let i1 = self.faces[(fi as usize, 1)] as usize;
-                    let i2 = self.faces[(fi as usize, 2)] as usize;
+            // Collect and sort by earliest collision time so we resolve in order.
+            let mut events: Vec<(f32, usize, u32, f32, f32, f32)> = Vec::new(); // (t, vi, fi, wa, wb, wc)
 
-                    let p = na::Vector3::new(self.q[(vi, 0)], self.q[(vi, 1)], self.q[(vi, 2)]);
-                    let a = na::Vector3::new(self.q[(i0, 0)], self.q[(i0, 1)], self.q[(i0, 2)]);
-                    let b = na::Vector3::new(self.q[(i1, 0)], self.q[(i1, 1)], self.q[(i1, 2)]);
-                    let c = na::Vector3::new(self.q[(i2, 0)], self.q[(i2, 1)], self.q[(i2, 2)]);
+            for (vi, fi) in sc_pairs {
+                let i0 = self.faces[(fi as usize, 0)] as usize;
+                let i1 = self.faces[(fi as usize, 1)] as usize;
+                let i2 = self.faces[(fi as usize, 2)] as usize;
 
-                    let closest = closest_point_on_triangle(p, a, b, c);
-                    let d = p - closest;
-                    let dist_sq = d.norm_squared();
+                let p0 = na::Vector3::new(self.q_prev[(vi,0)], self.q_prev[(vi,1)], self.q_prev[(vi,2)]);
+                let p1 = na::Vector3::new(self.q[(vi,0)],      self.q[(vi,1)],      self.q[(vi,2)]);
+                let a0 = na::Vector3::new(self.q_prev[(i0,0)], self.q_prev[(i0,1)], self.q_prev[(i0,2)]);
+                let a1 = na::Vector3::new(self.q[(i0,0)],      self.q[(i0,1)],      self.q[(i0,2)]);
+                let b0 = na::Vector3::new(self.q_prev[(i1,0)], self.q_prev[(i1,1)], self.q_prev[(i1,2)]);
+                let b1 = na::Vector3::new(self.q[(i1,0)],      self.q[(i1,1)],      self.q[(i1,2)]);
+                let c0 = na::Vector3::new(self.q_prev[(i2,0)], self.q_prev[(i2,1)], self.q_prev[(i2,2)]);
+                let c1 = na::Vector3::new(self.q[(i2,0)],      self.q[(i2,1)],      self.q[(i2,2)]);
 
-                    if dist_sq >= t2 || dist_sq < 1e-12 {
-                        continue;
-                    }
+                if let Some((t, wa, wb, wc)) = ccd_vertex_triangle(p0, p1, a0, a1, b0, b1, c0, c1, threshold) {
+                    events.push((t, vi, fi, wa, wb, wc));
+                }
+            }
 
-                    let dist  = dist_sq.sqrt();
-                    let n_hat = d / dist;
-                    let pen   = threshold - dist;
+            // Resolve earliest collisions first.
+            events.sort_unstable_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
 
-                    // Distribute correction weighted by inverse mass (w).
-                    // Triangle vertices share 1/3 of the triangle's contribution each.
-                    let wv = self.w[vi];
-                    let w0 = self.w[i0] / 3.0;
-                    let w1 = self.w[i1] / 3.0;
-                    let w2 = self.w[i2] / 3.0;
-                    let total_w = wv + w0 + w1 + w2;
-                    if total_w < 1e-12 {
-                        continue;
-                    }
+            for (_, vi, fi, wa, wb, wc) in events {
+                let i0 = self.faces[(fi as usize, 0)] as usize;
+                let i1 = self.faces[(fi as usize, 1)] as usize;
+                let i2 = self.faces[(fi as usize, 2)] as usize;
 
-                    if wv > 0.0 {
-                        let delta = (wv / total_w) * pen;
-                        self.q[(vi, 0)] += n_hat[0] * delta;
-                        self.q[(vi, 1)] += n_hat[1] * delta;
-                        self.q[(vi, 2)] += n_hat[2] * delta;
-                    }
-                    for (ti, wi) in [(i0, w0), (i1, w1), (i2, w2)] {
-                        if self.w[ti] > 0.0 {
-                            let delta = (wi / total_w) * pen;
-                            self.q[(ti, 0)] -= n_hat[0] * delta;
-                            self.q[(ti, 1)] -= n_hat[1] * delta;
-                            self.q[(ti, 2)] -= n_hat[2] * delta;
-                        }
+                // Compute normal from triangle at t=1 (post-constraint positions).
+                let a = na::Vector3::new(self.q[(i0,0)], self.q[(i0,1)], self.q[(i0,2)]);
+                let b = na::Vector3::new(self.q[(i1,0)], self.q[(i1,1)], self.q[(i1,2)]);
+                let c = na::Vector3::new(self.q[(i2,0)], self.q[(i2,1)], self.q[(i2,2)]);
+                let p = na::Vector3::new(self.q[(vi, 0)], self.q[(vi, 1)], self.q[(vi, 2)]);
+
+                let n_hat = (b - a).cross(&(c - a));
+                let n_len = n_hat.norm();
+                if n_len < 1e-12 { continue; }
+                let n_hat = n_hat / n_len;
+
+                // Orient normal toward the vertex.
+                let n_hat = if n_hat.dot(&(p - a)) < 0.0 { -n_hat } else { n_hat };
+
+                let pen = threshold - n_hat.dot(&(p - a));
+                if pen <= 0.0 { continue; }
+
+                // Mass-weighted correction using barycentric coords.
+                let wv = self.w[vi];
+                let w0 = self.w[i0] * wa;
+                let w1 = self.w[i1] * wb;
+                let w2 = self.w[i2] * wc;
+                let total_w = wv + w0 + w1 + w2;
+                if total_w < 1e-12 { continue; }
+
+                if wv > 0.0 {
+                    let delta = (wv / total_w) * pen;
+                    self.q[(vi, 0)] += n_hat[0] * delta;
+                    self.q[(vi, 1)] += n_hat[1] * delta;
+                    self.q[(vi, 2)] += n_hat[2] * delta;
+                }
+                for (ti, wi) in [(i0, w0), (i1, w1), (i2, w2)] {
+                    if self.w[ti] > 0.0 {
+                        let delta = (wi / total_w) * pen;
+                        self.q[(ti, 0)] -= n_hat[0] * delta;
+                        self.q[(ti, 1)] -= n_hat[1] * delta;
+                        self.q[(ti, 2)] -= n_hat[2] * delta;
                     }
                 }
             }
         }
 
+        // ── 4. Velocity update ────────────────────────────────────────────────
+        // Collision responses are baked in automatically: displaced vertices
+        // get corrected velocities for free from (q - q_prev) / dt.
         let inv_dt = 1.0 / dt;
         for i in 0..n {
             if self.w[i] > 0.0 {
