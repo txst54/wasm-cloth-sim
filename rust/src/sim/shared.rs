@@ -245,7 +245,7 @@ pub struct SimCore {
 }
 
 impl SimCore {
-    pub fn from_cloth(cloth: &Cloth) -> Self {
+    pub fn from_cloth(cloth: &Cloth, pinned: &[usize]) -> Self {
         let n = cloth.resolution as usize;
         let num_verts = n * n;
 
@@ -258,8 +258,9 @@ impl SimCore {
         let v = Positions::zeros(num_verts);
 
         let mut w = na::DVector::from_element(num_verts, 1.0f32);
-        w[(n-1)*n]         = 0.0; // upper-left  pinned
-        w[(n-1)*n + (n-1)] = 0.0; // upper-right pinned
+        for &idx in pinned {
+            w[idx] = 0.0;
+        }
 
         let num_quads = (n-1)*(n-1);
         let mut faces = Faces::zeros(num_quads * 2);

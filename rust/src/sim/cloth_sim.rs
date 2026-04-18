@@ -24,7 +24,9 @@ impl DerefMut for ClothSim {
 
 impl ClothSim {
     pub fn from_cloth(cloth: &Cloth) -> Self {
-        Self { core: SimCore::from_cloth(cloth) }
+        let n = cloth.resolution as usize;
+        let pinned = vec![(n-1)*n, (n-1)*n + (n-1)]; // upper-left, upper-right
+        Self { core: SimCore::from_cloth(cloth, &pinned) }
     }
 
     pub fn step(&mut self, params: &SimParams) {

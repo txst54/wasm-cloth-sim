@@ -69,7 +69,10 @@ impl DerefMut for PaperSim {
 impl PaperSim {
     pub fn from_cloth(cloth: &Cloth) -> Self {
         Self {
-            core: SimCore::from_cloth(cloth),
+            core: {
+                let n = cloth.resolution as usize;
+                SimCore::from_cloth(cloth, &[(n-1)*n + (n-1)]) // upper-right only
+            },
             hinges: Vec::new(),
             fold_speed: 5.0,
         }
