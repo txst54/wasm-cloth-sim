@@ -157,7 +157,7 @@ function buildPanel() {
   panel.appendChild(Divider());
 
   panel.appendChild(SliderRow({
-    label: 'resolution', min: 4, max: 128, step: 1, value: 64,
+    label: 'resolution', min: 4, max: 128, step: 1, value: 32,
     onChange: v => set_resolution(Math.round(v)),
   }));
 

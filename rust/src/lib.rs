@@ -6,6 +6,7 @@ mod cloth;
 mod light;
 mod params;
 mod sim;
+mod bvh;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -64,7 +65,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     let ctx    = GpuContext::new(canvas.clone()).await?;
     let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
     let camera = Camera::new(&ctx);
-    let cloth  = Cloth::new(&ctx, 64, &light);
+    let cloth  = Cloth::new(&ctx, 32, &light);
     let sim    = ClothSim::from_cloth(&cloth);
 
     let state = Rc::new(RefCell::new(AppState {
@@ -78,6 +79,16 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         keys: [false; 4],
     }));
     APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    let fps_div = window.document().unwrap()
+        .create_element("div").unwrap();
+
+    fps_div.set_inner_html("FPS: 0");
+    fps_div.set_attribute("style",
+                          "position:fixed; top:10px; left:10px; color:white; font-family:monospace; z-index:1000;"
+    ).unwrap();
+
+    window.document().unwrap().body().unwrap().append_child(&fps_div).unwrap();
 
     // Convert a MouseEvent's offset coordinates to NDC [-1, 1].
     fn to_ndc(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
@@ -239,6 +250,8 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let loop_fn_inner = loop_fn.clone();
     let state_inner   = state.clone();
+    let last_time = Rc::new(RefCell::new(0.0));
+    let fps = Rc::new(RefCell::new(0.0));
 
     *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
         let mut s = state_inner.borrow_mut();
@@ -263,6 +276,21 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
             cloth.render(ctx, &view, light, camera);
             frame.present();
         }
+
+        let now = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now();
+
+        let mut last = last_time.borrow_mut();
+        let dt = now - *last;
+        *last = now;
+
+        if dt > 0.0 {
+            *fps.borrow_mut() = 1000.0 / dt;
+        }
+        fps_div.set_inner_html(&format!("FPS: {:.1}", *fps.borrow()));
 
         web_sys::window()
             .unwrap()
