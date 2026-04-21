@@ -651,7 +651,7 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 #[wasm_bindgen] pub fn set_pulling_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().pulling_weight = v); }
 #[wasm_bindgen] pub fn set_self_collision_enabled(v: bool)          { PARAMS.with(|p| p.borrow_mut().self_collision_enabled = v); }
 #[wasm_bindgen] pub fn set_self_collision_threshold(v: f64)         { PARAMS.with(|p| p.borrow_mut().self_collision_threshold = v); }
-#[wasm_bindgen] pub fn set_self_collision_recompute_pairs(v: bool)  { PARAMS.with(|p| p.borrow_mut().self_collision_recompute_pairs = v); }
+#[wasm_bindgen] pub fn set_self_collision_recompute_iters(v: u16)  { PARAMS.with(|p| p.borrow_mut().self_collision_recompute_iters = v); }
 #[wasm_bindgen] pub fn set_use_distance_constraints(v: bool)        { PARAMS.with(|p| p.borrow_mut().use_distance_constraints = v); }
 #[wasm_bindgen] pub fn set_pulling_area(v: u32)    { PARAMS.with(|p| p.borrow_mut().pulling_area = v); }
 #[wasm_bindgen] pub fn set_damping(v: f64)         { PARAMS.with(|p| p.borrow_mut().damping = v); }
