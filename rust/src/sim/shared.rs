@@ -940,29 +940,46 @@ impl SimCore {
             vt_events.sort_unstable_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
             console::log_1(&format!("vt events = {}", vt_events.len()).into());
 
-            for (_, vi, fi, wa, wb, wc) in vt_events {
+            for (t_star, vi, fi, wa, wb, wc) in vt_events {
                 let i0 = self.faces[(fi as usize, 0)] as usize;
                 let i1 = self.faces[(fi as usize, 1)] as usize;
                 let i2 = self.faces[(fi as usize, 2)] as usize;
 
-                // Compute normal from triangle at t=1 (post-constraint positions).
-                let a = na::Vector3::new(self.q[(i0,0)], self.q[(i0,1)], self.q[(i0,2)]);
-                let b = na::Vector3::new(self.q[(i1,0)], self.q[(i1,1)], self.q[(i1,2)]);
-                let c = na::Vector3::new(self.q[(i2,0)], self.q[(i2,1)], self.q[(i2,2)]);
-                let p = na::Vector3::new(self.q[(vi, 0)], self.q[(vi, 1)], self.q[(vi, 2)]);
+                let lerp = |prev: f32, curr: f32| prev + t_star * (curr - prev);
 
-                let n_hat = (b - a).cross(&(c - a));
-                let n_len = n_hat.norm();
+                let p_t = na::Vector3::new(
+                    lerp(self.q_prev[(vi,0)], self.q[(vi,0)]),
+                    lerp(self.q_prev[(vi,1)], self.q[(vi,1)]),
+                    lerp(self.q_prev[(vi,2)], self.q[(vi,2)]),
+                );
+                let a_t = na::Vector3::new(
+                    lerp(self.q_prev[(i0,0)], self.q[(i0,0)]),
+                    lerp(self.q_prev[(i0,1)], self.q[(i0,1)]),
+                    lerp(self.q_prev[(i0,2)], self.q[(i0,2)]),
+                );
+                let b_t = na::Vector3::new(
+                    lerp(self.q_prev[(i1,0)], self.q[(i1,0)]),
+                    lerp(self.q_prev[(i1,1)], self.q[(i1,1)]),
+                    lerp(self.q_prev[(i1,2)], self.q[(i1,2)]),
+                );
+                let c_t = na::Vector3::new(
+                    lerp(self.q_prev[(i2,0)], self.q[(i2,0)]),
+                    lerp(self.q_prev[(i2,1)], self.q[(i2,1)]),
+                    lerp(self.q_prev[(i2,2)], self.q[(i2,2)]),
+                );
+
+                let n_raw = (b_t - a_t).cross(&(c_t - a_t));
+                let n_len = n_raw.norm();
                 if n_len < 1e-12 { continue; }
-                let n_hat = n_hat / n_len;
+                let n_hat = n_raw / n_len;
 
-                // Orient normal toward the vertex.
-                let n_hat = if n_hat.dot(&(p - a)) < 0.0 { -n_hat } else { n_hat };
+                // Orient toward the incoming vertex (side it came from).
+                let n_hat = if n_hat.dot(&(p_t - a_t)) < 0.0 { -n_hat } else { n_hat };
 
-                let pen = threshold - n_hat.dot(&(p - a));
+                let signed_dist = n_hat.dot(&(p_t - a_t));
+                let pen = threshold - signed_dist;
                 if pen <= 0.0 { continue; }
 
-                // Mass-weighted correction using barycentric coords.
                 let wv = self.w[vi];
                 let w0 = self.w[i0] * wa;
                 let w1 = self.w[i1] * wb;
@@ -990,36 +1007,59 @@ impl SimCore {
             console::log_1(&format!("ee events = {}", ee_events.len()).into());
 
 
-            for (_, ei, ej, s, u) in ee_events {
+            for (t_star, ei, ej, s, u) in ee_events {
                 let [pa, pb] = self.edges[ei];
                 let [qa, qb] = self.edges[ej];
 
                 let pa = pa as usize; let pb = pb as usize;
                 let qa = qa as usize; let qb = qb as usize;
 
-                // Response direction: cross product of the two edge directions at t=1.
-                let p = na::Vector3::new(self.q[(pa,0)], self.q[(pa,1)], self.q[(pa,2)]);
-                let q = na::Vector3::new(self.q[(pb,0)], self.q[(pb,1)], self.q[(pb,2)]);
-                let a = na::Vector3::new(self.q[(qa,0)], self.q[(qa,1)], self.q[(qa,2)]);
-                let b = na::Vector3::new(self.q[(qb,0)], self.q[(qb,1)], self.q[(qb,2)]);
+                // ── Reconstruct positions at t* ───────────────────────────────────────
+                let lerp = |prev: f32, curr: f32| prev + t_star * (curr - prev);
 
-                let n = (q - p).cross(&(b - a));
-                let n_len = n.norm();
+                let p_t = na::Vector3::new(
+                    lerp(self.q_prev[(pa,0)], self.q[(pa,0)]),
+                    lerp(self.q_prev[(pa,1)], self.q[(pa,1)]),
+                    lerp(self.q_prev[(pa,2)], self.q[(pa,2)]),
+                );
+                let q_t = na::Vector3::new(
+                    lerp(self.q_prev[(pb,0)], self.q[(pb,0)]),
+                    lerp(self.q_prev[(pb,1)], self.q[(pb,1)]),
+                    lerp(self.q_prev[(pb,2)], self.q[(pb,2)]),
+                );
+                let a_t = na::Vector3::new(
+                    lerp(self.q_prev[(qa,0)], self.q[(qa,0)]),
+                    lerp(self.q_prev[(qa,1)], self.q[(qa,1)]),
+                    lerp(self.q_prev[(qa,2)], self.q[(qa,2)]),
+                );
+                let b_t = na::Vector3::new(
+                    lerp(self.q_prev[(qb,0)], self.q[(qb,0)]),
+                    lerp(self.q_prev[(qb,1)], self.q[(qb,1)]),
+                    lerp(self.q_prev[(qb,2)], self.q[(qb,2)]),
+                );
+
+                // ── Normal at t* ──────────────────────────────────────────────────────
+                let pq_t = q_t - p_t;
+                let ab_t = b_t - a_t;
+                let n_raw = pq_t.cross(&ab_t);
+                let n_len = n_raw.norm();
                 if n_len < 1e-12 { continue; }
-                let n_hat = n / n_len;
+                let n_hat = n_raw / n_len;
 
-                // Orient toward separation.
-                let contact_pq = p + s * (q - p);
-                let contact_ab = a + u * (b - a);
+                // ── Contact points at t* ──────────────────────────────────────────────
+                let contact_pq = p_t + s * pq_t;
+                let contact_ab = a_t + u * ab_t;
                 let sep = contact_pq - contact_ab;
+
+                // Orient normal toward separation direction.
                 let n_hat = if n_hat.dot(&sep) < 0.0 { -n_hat } else { n_hat };
 
-                let dist = sep.norm();
-                let pen = threshold - dist;
+                // ── Penetration depth at t* ───────────────────────────────────────────
+                let signed_dist = n_hat.dot(&sep);
+                let pen = threshold - signed_dist;
                 if pen <= 0.0 { continue; }
 
-                // Weights: s interpolates along edge pq, u along edge ab.
-                // (1-s) and s are the barycentric weights of pa and pb respectively.
+                // ── Mass-weighted correction ──────────────────────────────────────────
                 let wpa = self.w[pa] * (1.0 - s);
                 let wpb = self.w[pb] * s;
                 let wqa = self.w[qa] * (1.0 - u);
@@ -1027,7 +1067,6 @@ impl SimCore {
                 let total_w = wpa + wpb + wqa + wqb;
                 if total_w < 1e-12 { continue; }
 
-                // Edge pq pushed along +n_hat, edge ab pushed along -n_hat.
                 for (vi, wi, sign) in [
                     (pa, wpa,  1.0f32),
                     (pb, wpb,  1.0f32),
