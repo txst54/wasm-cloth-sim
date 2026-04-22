@@ -236,7 +236,6 @@ impl PaperSim {
 
         // 1. Predict
         self.core.predict(params);
-        let sc_pairs = self.core.precompute_collision_pairs(params);
 
         // 2. Reset all lambdas
         self.core.reset_lambdas();
@@ -283,8 +282,9 @@ impl PaperSim {
                 }
             }
 
-            self.core.solve_self_collision(params, &sc_pairs);
         }
+
+        self.core.solve_self_collision(params);
 
         // 4. Remove rigid-body rotation from constraint corrections
         self.core.remove_rigid_rotation();
