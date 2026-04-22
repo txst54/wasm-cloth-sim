@@ -30,7 +30,7 @@ impl ClothSim {
     }
 
     pub fn step(&mut self, params: &SimParams) {
-        self.core.step(params, &HashSet::new(), |_, _| {});
+        self.core.step(params, &HashSet::new());
     }
 
     pub fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) {
@@ -39,7 +39,7 @@ impl ClothSim {
 }
 
 impl MeshSim for ClothSim {
-    fn step(&mut self, params: &SimParams)                        { self.core.step(params, &HashSet::new(), |_, _| {}); }
+    fn step(&mut self, params: &SimParams)                        { self.core.step(params, &HashSet::new()); }
     fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) { self.core.write_to_cloth(cloth, ctx); }
     fn positions(&self) -> &Positions                             { &self.core.q }
     fn set_clicked_vertex(&mut self, vi: Option<usize>)           { self.core.clicked_vertex = vi; }

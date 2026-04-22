@@ -24,8 +24,10 @@ web-sys = { version = "0.3", features = [
     "TouchList",
     "Touch",
     "DomRect",
-    "Element"
+    "Element",
+    "console"
 ] }
 wgpu = "29.0.1"
 bytemuck = { version = "1", features = ["derive"] }
 nalgebra = "0.33"
+spade = "2"

@@ -1,6 +1,7 @@
 import './style.css'
 import init, {
   run_paper,
+  run_paper_with_cp,
   set_paper_fold_angle,
   set_paper_fold_speed,
   set_paper_hinge_compliance,
@@ -17,6 +18,7 @@ import init, {
   set_pulling_area,
   set_self_collision_enabled,
   set_damping,
+  set_wireframe_enabled,
 } from '../rust/pkg/my_webgpu_app.js'
 import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions } from './components.js'
 
@@ -37,6 +39,13 @@ function buildPanel() {
   back.textContent = '← cloth sim'
   panel.appendChild(back)
 
+  // Wireframe toggle
+  panel.appendChild(CheckboxRow({
+    label: 'show wireframe',
+    checked: false,
+    onChange: set_wireframe_enabled,
+  }))
+
   panel.appendChild(Divider())
 
   // ── Fold control ──────────────────────────────────────────────────────────
@@ -47,7 +56,7 @@ function buildPanel() {
 
   panel.appendChild(SliderRow({
     label: 'angle (°)',
-    min: 0, max: 180, step: 1, value: 180,
+    min: 0, max: 180, step: 1, value: 0,
     onChange: v => set_paper_fold_angle(v),
   }))
 
@@ -70,7 +79,7 @@ function buildPanel() {
   // ── Physics ───────────────────────────────────────────────────────────────
   panel.appendChild(SliderRow({
     label: 'damping',
-    min: 0, max: 0.5, step: 0.01, value: 0.5,
+    min: 0, max: 0.5, step: 0.01, value: 0.7,
     onChange: set_damping,
   }))
 
@@ -105,7 +114,7 @@ function buildPanel() {
     enabled: true,
     onToggle: set_stretch_enabled,
     sliders: [
-      new SliderOptions({ weight: 0.9, weightLabel: 'weight', onWeightChange: set_stretch_weight }),
+      new SliderOptions({ weight: 1.0, weightLabel: 'weight', onWeightChange: set_stretch_weight }),
     ],
   }))
 
@@ -114,7 +123,7 @@ function buildPanel() {
     enabled: true,
     onToggle: set_bending_enabled,
     sliders: [
-      new SliderOptions({ weight: 0.9, weightLabel: 'weight', onWeightChange: set_bending_weight }),
+      new SliderOptions({ weight: 1.0, weightLabel: 'weight', onWeightChange: set_bending_weight }),
     ],
   }))
 
@@ -138,19 +147,28 @@ function buildPanel() {
 }
 
 init().then(async () => {
-  // Paper sim defaults: no gravity, no self-collision, light damping.
-  // Bending is disabled because it conflicts with hinge constraints and
-  // causes the wave instability — stretch alone keeps the panels flat.
+  // Paper sim defaults
   set_gravity_enabled(true)
-  set_self_collision_enabled(true)
+  set_self_collision_enabled(false)
   set_bending_enabled(true)
-  set_stretch_weight(0.9)
-  set_bending_weight(0.9)
+  set_stretch_weight(1.0)
+  set_bending_weight(1.0)
   set_constraint_iters(10)
-  set_damping(0.5)
+  set_damping(0.7)
 
   try {
-    await run_paper('canvas')
+    // Fetch the crease pattern file
+    const file = 'assets/waterbomb.cp'
+    const cpResponse = await fetch(file)
+    if (cpResponse.ok) {
+      const cpData = await cpResponse.text()
+      await run_paper_with_cp('canvas', cpData)
+      console.log(`Loaded crease pattern: ${file}`)
+    } else {
+      // Fallback to simple paper sim
+      console.log('No crease pattern found, using simple paper sim')
+      await run_paper('canvas')
+    }
   } catch (e) {
     console.error('run_paper() failed:', e)
   }
