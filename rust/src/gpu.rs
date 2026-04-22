@@ -6,6 +6,21 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    pub depth_view: wgpu::TextureView,
+}
+
+fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Depth"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl GpuContext {
@@ -55,8 +70,9 @@ impl GpuContext {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        let depth_view = make_depth_view(&device, width, height);
 
-        Ok(Self { device, queue, surface, config })
+        Ok(Self { device, queue, surface, config, depth_view })
     }
 
     pub fn begin_frame(&self) -> Result<(wgpu::SurfaceTexture, wgpu::TextureView), JsValue> {

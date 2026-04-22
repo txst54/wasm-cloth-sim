@@ -66,12 +66,8 @@ export function SliderRow({ label, min, max, step, value, indent = false, onChan
 export function ConstraintGroup({
   label,
   enabled,
-  weight,
-  weightMin = 0,
-  weightMax = 1,
-  weightStep = 0.05,
   onToggle,
-  onWeightChange,
+  sliders,
 }) {
   const root = el('div', 'mb-2')
 
@@ -84,19 +80,45 @@ export function ConstraintGroup({
   checkbox.addEventListener('change', () => onToggle(checkbox.checked))
 
   root.appendChild(checkLabel)
-
-  if (weight !== undefined && onWeightChange) {
-    root.appendChild(SliderRow({
-      label: 'weight',
-      min: weightMin,
-      max: weightMax,
-      step: weightStep,
-      value: weight,
-      indent: true,
-      onChange: onWeightChange,
-    }))
+  if (sliders) {
+    for (const s of sliders) {
+      if (s.weight !== undefined && s.onWeightChange) {
+        root.appendChild(SliderRow({
+          label: s.weightLabel,
+          min: s.weightMin,
+          max: s.weightMax,
+          step: s.weightStep,
+          value: s.weight,
+          indent: true,
+          onChange: s.onWeightChange,
+        }))
+      }
+    }
   }
+  return root
+}
 
+/**
+ * CheckboxRow — a single labeled checkbox, optionally indented.
+ *
+ * Props:
+ *   label    {string}
+ *   checked  {boolean}  initial state
+ *   indent   {boolean}  left-indent (for sub-params, default true)
+ *   onChange {fn}       called with boolean on change
+ *
+ * Returns a <div> DOM node.
+ */
+export function CheckboxRow({ label, checked, indent = true, onChange }) {
+  const root = el('div', 'mb-1')
+  const checkLabel = el('label', `flex items-center gap-2 cursor-pointer${indent ? ' pl-4' : ''}`)
+  const checkbox = el('input', 'accent-white cursor-pointer', { type: 'checkbox' })
+  checkbox.checked = checked
+  const checkText = el('span', 'text-white/60')
+  checkText.textContent = label
+  checkLabel.append(checkbox, checkText)
+  checkbox.addEventListener('change', () => onChange(checkbox.checked))
+  root.appendChild(checkLabel)
   return root
 }
 
@@ -105,4 +127,22 @@ export function ConstraintGroup({
  */
 export function Divider() {
   return el('div', 'border-t border-white/10 my-2')
+}
+
+export class SliderOptions {
+  constructor({
+                weight,
+                weightLabel = 'weight',
+                weightMin = 0,
+                weightMax = 1,
+                weightStep = 0.05,
+                onWeightChange,
+              } = {}) {
+    this.weight = weight;
+    this.weightLabel = weightLabel;
+    this.weightMin = weightMin;
+    this.weightMax = weightMax;
+    this.weightStep = weightStep;
+    this.onWeightChange = onWeightChange;
+  }
 }

@@ -16,6 +16,19 @@ pub struct SimParams {
 
     pub pulling_enabled:   bool,
     pub pulling_weight:    f64,
+    pub pulling_area:     u32,
+
+    pub self_collision_enabled:   bool,
+    /// Distance (world units) below which a vertex is considered in contact with a triangle.
+    /// Default ≈ 1.5× the rest edge length for a 64-resolution cloth on [−1, 1].
+    pub self_collision_threshold: f64,
+    pub self_collision_recompute_iters: u16,
+    /// When true, stretch and bending use per-edge distance constraints (fast, O(E)).
+    /// When false, they use shape-matching with SVD polar decomposition (slower, higher quality).
+    pub use_distance_constraints: bool,
+    /// Velocity damping applied after each step: v *= (1 - damping).
+    /// 0.0 = no damping (default); 0.05 = 5% reduction per step.
+    pub damping: f64,
 }
 
 impl Default for SimParams {
@@ -37,7 +50,14 @@ impl Default for SimParams {
             bending_weight:   0.5,
 
             pulling_enabled:  true,
-            pulling_weight:   0.5,
+            pulling_weight:   0.1,
+            pulling_area:     5,
+
+            self_collision_enabled:   true,
+            self_collision_threshold: 0.02,
+            self_collision_recompute_iters: 1,
+            use_distance_constraints: false,
+            damping: 0.0,
         }
     }
 }

@@ -6,8 +6,10 @@ mod cloth;
 mod light;
 mod params;
 mod sim;
+mod bvh;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use wasm_bindgen::closure::Closure;
@@ -20,10 +22,12 @@ use cloth::Cloth;
 use gpu::GpuContext;
 use light::Light;
 use params::SimParams;
-use sim::ClothSim;
+use sim::{ClothSim, CreasePattern, CreaseType, FoldDirection, FoldSpec, PaperSim};
 
 thread_local! {
     static PARAMS: Rc<RefCell<SimParams>> = Rc::new(RefCell::new(SimParams::default()));
+    static APP_STATE: RefCell<Option<Rc<RefCell<AppState>>>> = RefCell::new(None);
+    static PAPER_APP_STATE: RefCell<Option<Rc<RefCell<PaperAppState>>>> = RefCell::new(None);
 }
 
 struct AppState {
@@ -35,6 +39,17 @@ struct AppState {
     params: Rc<RefCell<SimParams>>,
     canvas: HtmlCanvasElement,
     /// [left, right, up, down] arrow key held state
+    keys:   [bool; 4],
+}
+
+struct PaperAppState {
+    ctx:    GpuContext,
+    cloth:  Cloth,
+    light:  Light,
+    camera: Camera,
+    sim:    PaperSim,
+    params: Rc<RefCell<SimParams>>,
+    canvas: HtmlCanvasElement,
     keys:   [bool; 4],
 }
 
@@ -50,7 +65,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     let ctx    = GpuContext::new(canvas.clone()).await?;
     let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
     let camera = Camera::new(&ctx);
-    let cloth  = Cloth::new(&ctx, 64, &light);
+    let cloth  = Cloth::new(&ctx, 32, &light);
     let sim    = ClothSim::from_cloth(&cloth);
 
     let state = Rc::new(RefCell::new(AppState {
@@ -63,6 +78,17 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         canvas: canvas.clone(),
         keys: [false; 4],
     }));
+    APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    let fps_div = window.document().unwrap()
+        .create_element("div").unwrap();
+
+    fps_div.set_inner_html("FPS: 0");
+    fps_div.set_attribute("style",
+                          "position:fixed; top:10px; left:10px; color:white; font-family:monospace; z-index:1000;"
+    ).unwrap();
+
+    window.document().unwrap().body().unwrap().append_child(&fps_div).unwrap();
 
     // Convert a MouseEvent's offset coordinates to NDC [-1, 1].
     fn to_ndc(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
@@ -99,6 +125,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
             s.sim.q[(best_idx, 2)],
         ];
         s.sim.clicked_vertex = Some(best_idx);
+        s.sim.dragging_vertices = None;
         s.sim.mouse_pos = ray_plane_intersect(nx, ny, vertex_world, &s.camera)
             .unwrap_or(vertex_world);
     }));
@@ -223,6 +250,8 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let loop_fn_inner = loop_fn.clone();
     let state_inner   = state.clone();
+    let last_time = Rc::new(RefCell::new(0.0));
+    let fps = Rc::new(RefCell::new(0.0));
 
     *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
         let mut s = state_inner.borrow_mut();
@@ -248,6 +277,21 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
             frame.present();
         }
 
+        let now = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now();
+
+        let mut last = last_time.borrow_mut();
+        let dt = now - *last;
+        *last = now;
+
+        if dt > 0.0 {
+            *fps.borrow_mut() = 1000.0 / dt;
+        }
+        fps_div.set_inner_html(&format!("FPS: {:.1}", *fps.borrow()));
+
         web_sys::window()
             .unwrap()
             .request_animation_frame(
@@ -261,6 +305,469 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     )?;
 
     Ok(())
+}
+
+/// Start the paper simulation on the given canvas.
+///
+/// Sets up a center vertical fold using all interior edges along column `n/2`.
+/// All other behaviour (dragging, camera, self-collision, etc.) is identical
+/// to the cloth simulation.
+#[wasm_bindgen]
+pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    let window  = web_sys::window().unwrap();
+    let canvas  = window
+        .document().unwrap()
+        .get_element_by_id(canvas_id).unwrap()
+        .dyn_into::<HtmlCanvasElement>().unwrap();
+
+    let ctx    = GpuContext::new(canvas.clone()).await?;
+    let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
+    let camera = Camera::new(&ctx);
+    let cloth  = Cloth::new(&ctx, 32, &light);
+
+    let mut sim = PaperSim::from_cloth(&cloth);
+
+    // Register a center vertical fold: all interior edges at column n/2.
+    let n   = cloth.resolution as usize;
+    let col = n / 2;
+    let mut fold_map: HashMap<(u32, u32), FoldSpec> = HashMap::new();
+    for row in 0..(n - 1) {
+        let a = (row * n + col) as u32;
+        let b = ((row + 1) * n + col) as u32;
+        let lo = a.min(b); let hi = a.max(b);
+        fold_map.insert((lo, hi), FoldSpec { target_angle: std::f32::consts::PI, compliance: 1e-4, direction: FoldDirection::Mountain });
+    }
+    sim.set_fold_map(fold_map);
+
+    let state = Rc::new(RefCell::new(PaperAppState {
+        ctx, cloth, light, camera, sim,
+        params: PARAMS.with(|p| p.clone()),
+        canvas: canvas.clone(),
+        keys: [false; 4],
+    }));
+    PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    // ── Event handlers (identical pattern to run(), but via PAPER_APP_STATE) ──
+
+    fn to_ndc_p(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let w = canvas.offset_width()  as f32;
+        let h = canvas.offset_height() as f32;
+        let nx =  (event.offset_x() as f32 / w) * 2.0 - 1.0;
+        let ny = -(event.offset_y() as f32 / h) * 2.0 + 1.0;
+        (nx, ny)
+    }
+
+    let state_md = state.clone();
+    let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_md.borrow_mut();
+        let (nx, ny) = to_ndc_p(&e, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i,0)], s.sim.q[(i,1)], s.sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.sim.q[(best_idx,0)], s.sim.q[(best_idx,1)], s.sim.q[(best_idx,2)]];
+        s.sim.clicked_vertex   = Some(best_idx);
+        s.sim.dragging_vertices = None;
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())?;
+    mousedown.forget();
+
+    let state_mm = state.clone();
+    let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_mm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc_p(&e, &s.canvas);
+            let cp = [s.sim.q[(v,0)], s.sim.q[(v,1)], s.sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
+    mousemove.forget();
+
+    let state_mu = state.clone();
+    let mouseup = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |_: MouseEvent| {
+        state_mu.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())?;
+    mouseup.forget();
+
+    fn to_ndc_touch_p(touch: &web_sys::Touch, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let rect = canvas.get_bounding_client_rect();
+        let ox = touch.client_x() as f32 - rect.left() as f32;
+        let oy = touch.client_y() as f32 - rect.top()  as f32;
+        let nx =  (ox / rect.width()  as f32) * 2.0 - 1.0;
+        let ny = -(oy / rect.height() as f32) * 2.0 + 1.0;
+        (nx, ny)
+    }
+
+    let state_ts = state.clone();
+    let touchstart = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_ts.borrow_mut();
+        let (nx, ny) = to_ndc_touch_p(&touch, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i,0)], s.sim.q[(i,1)], s.sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.sim.q[(best_idx,0)], s.sim.q[(best_idx,1)], s.sim.q[(best_idx,2)]];
+        s.sim.clicked_vertex = Some(best_idx);
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("touchstart", touchstart.as_ref().unchecked_ref())?;
+    touchstart.forget();
+
+    let state_tm = state.clone();
+    let touchmove = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_tm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc_touch_p(&touch, &s.canvas);
+            let cp = [s.sim.q[(v,0)], s.sim.q[(v,1)], s.sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("touchmove", touchmove.as_ref().unchecked_ref())?;
+    touchmove.forget();
+
+    let state_te = state.clone();
+    let touchend = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |_: TouchEvent| {
+        state_te.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("touchend", touchend.as_ref().unchecked_ref())?;
+    touchend.forget();
+
+    let state_kd = state.clone();
+    let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            e.prevent_default();
+            state_kd.borrow_mut().keys[idx] = true;
+        }
+    }));
+    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    keydown.forget();
+
+    let state_ku = state.clone();
+    let keyup = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            state_ku.borrow_mut().keys[idx] = false;
+        }
+    }));
+    window.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+    keyup.forget();
+
+    // ── RAF loop ──────────────────────────────────────────────────────────────
+    let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let loop_fn_inner = loop_fn.clone();
+    let state_inner   = state.clone();
+
+    *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let mut s = state_inner.borrow_mut();
+        let PaperAppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+
+        const SPEED: f32 = 0.02;
+        if keys[0] { camera.yaw   -= SPEED; }
+        if keys[1] { camera.yaw   += SPEED; }
+        if keys[2] { camera.pitch += SPEED; }
+        if keys[3] { camera.pitch -= SPEED; }
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
+
+        sim.step(&params.borrow());
+        sim.write_to_cloth(cloth, ctx);
+
+        if let Ok((frame, view)) = ctx.begin_frame() {
+            cloth.render(ctx, &view, light, camera);
+            frame.present();
+        }
+
+        web_sys::window().unwrap()
+            .request_animation_frame(
+                loop_fn_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+            ).unwrap();
+    }) as Box<dyn FnMut()>));
+
+    window.request_animation_frame(
+        loop_fn.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+    )?;
+
+    Ok(())
+}
+
+/// Start the paper simulation with a crease pattern (.cp file contents).
+#[wasm_bindgen]
+pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    let window = web_sys::window().unwrap();
+    let canvas = window
+        .document().unwrap()
+        .get_element_by_id(canvas_id).unwrap()
+        .dyn_into::<HtmlCanvasElement>().unwrap();
+
+    let ctx = GpuContext::new(canvas.clone()).await?;
+    let light = Light::new(&ctx, [2.0, 0.0, 0.5]);
+    let camera = Camera::new(&ctx);
+
+    // Parse creasepattern and build mesh
+    let cp = CreasePattern::parse(cp_data)
+        .map_err(|e| JsValue::from_str(&e))?;
+    let (sim, positions, faces, colors, edge_colors) = PaperSim::from_crease_pattern(&cp);
+    let cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
+
+    let state = Rc::new(RefCell::new(PaperAppState {
+        ctx, cloth, light, camera, sim,
+        params: PARAMS.with(|p| p.clone()),
+        canvas: canvas.clone(),
+        keys: [false; 4],
+    }));
+    PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    // ── Event handlers ────────────────────────────────────────────────────────
+
+    fn to_ndc_p(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let w = canvas.offset_width() as f32;
+        let h = canvas.offset_height() as f32;
+        let nx = (event.offset_x() as f32 / w) * 2.0 - 1.0;
+        let ny = -(event.offset_y() as f32 / h) * 2.0 + 1.0;
+        (nx, ny)
+    }
+
+    let state_md = state.clone();
+    let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_md.borrow_mut();
+        let (nx, ny) = to_ndc_p(&e, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i,0)], s.sim.q[(i,1)], s.sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.sim.q[(best_idx,0)], s.sim.q[(best_idx,1)], s.sim.q[(best_idx,2)]];
+        s.sim.clicked_vertex = Some(best_idx);
+        s.sim.dragging_vertices = None;
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())?;
+    mousedown.forget();
+
+    let state_mm = state.clone();
+    let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_mm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc_p(&e, &s.canvas);
+            let cp = [s.sim.q[(v,0)], s.sim.q[(v,1)], s.sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
+    mousemove.forget();
+
+    let state_mu = state.clone();
+    let mouseup = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |_: MouseEvent| {
+        state_mu.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())?;
+    mouseup.forget();
+
+    fn to_ndc_touch_p(touch: &web_sys::Touch, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let rect = canvas.get_bounding_client_rect();
+        let ox = touch.client_x() as f32 - rect.left() as f32;
+        let oy = touch.client_y() as f32 - rect.top() as f32;
+        let nx = (ox / rect.width() as f32) * 2.0 - 1.0;
+        let ny = -(oy / rect.height() as f32) * 2.0 + 1.0;
+        (nx, ny)
+    }
+
+    let state_ts = state.clone();
+    let touchstart = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_ts.borrow_mut();
+        let (nx, ny) = to_ndc_touch_p(&touch, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i,0)], s.sim.q[(i,1)], s.sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.sim.q[(best_idx,0)], s.sim.q[(best_idx,1)], s.sim.q[(best_idx,2)]];
+        s.sim.clicked_vertex = Some(best_idx);
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("touchstart", touchstart.as_ref().unchecked_ref())?;
+    touchstart.forget();
+
+    let state_tm = state.clone();
+    let touchmove = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_tm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc_touch_p(&touch, &s.canvas);
+            let cp = [s.sim.q[(v,0)], s.sim.q[(v,1)], s.sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("touchmove", touchmove.as_ref().unchecked_ref())?;
+    touchmove.forget();
+
+    let state_te = state.clone();
+    let touchend = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |_: TouchEvent| {
+        state_te.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("touchend", touchend.as_ref().unchecked_ref())?;
+    touchend.forget();
+
+    let state_kd = state.clone();
+    let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            e.prevent_default();
+            state_kd.borrow_mut().keys[idx] = true;
+        }
+    }));
+    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    keydown.forget();
+
+    let state_ku = state.clone();
+    let keyup = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            state_ku.borrow_mut().keys[idx] = false;
+        }
+    }));
+    window.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+    keyup.forget();
+
+    // ── RAF loop ──────────────────────────────────────────────────────────────
+    let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let loop_fn_inner = loop_fn.clone();
+    let state_inner = state.clone();
+
+    *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let mut s = state_inner.borrow_mut();
+        let PaperAppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+
+        const SPEED: f32 = 0.02;
+        if keys[0] { camera.yaw -= SPEED; }
+        if keys[1] { camera.yaw += SPEED; }
+        if keys[2] { camera.pitch += SPEED; }
+        if keys[3] { camera.pitch -= SPEED; }
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
+
+        sim.step(&params.borrow());
+        sim.write_to_cloth(cloth, ctx);
+
+        if let Ok((frame, view)) = ctx.begin_frame() {
+            cloth.render(ctx, &view, light, camera);
+            frame.present();
+        }
+
+        web_sys::window().unwrap()
+            .request_animation_frame(
+                loop_fn_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+            ).unwrap();
+    }) as Box<dyn FnMut()>));
+
+    window.request_animation_frame(
+        loop_fn.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+    )?;
+
+    Ok(())
+}
+
+/// Set the XPBD compliance α for all paper hinges.
+/// Smaller = stiffer / faster fold (1e-6 … 1e-2 typical range).
+#[wasm_bindgen]
+pub fn set_paper_hinge_compliance(alpha: f64) {
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            for hinge in &mut s.sim.hinges {
+                hinge.compliance = alpha as f32;
+            }
+        }
+    });
+}
+
+/// Set how fast the hinge goal angle tracks the user target (radians / second).
+/// Higher = more responsive but risks instability on large jumps.
+/// Default 5.0 rad/s (≈286 °/s; a 90° fold takes ~0.3 s).
+#[wasm_bindgen]
+pub fn set_paper_fold_speed(rads_per_sec: f64) {
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            state.borrow_mut().sim.fold_speed = rads_per_sec as f32;
+        }
+    });
+}
+
+/// Set the target dihedral angle for all paper hinges.
+///
+/// `degrees` is the dihedral angle in degrees:
+/// - 180° → flat (no fold)
+/// - 90°  → 90° fold
+/// - 0°   → panels face each other
+///
+/// Mountain and valley folds fold in opposite directions.
+#[wasm_bindgen]
+pub fn set_paper_fold_angle(degrees: f64) {
+    let base_target = degrees as f32 * std::f32::consts::PI / 180.0;
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            for hinge in &mut s.sim.hinges {
+                hinge.target_angle = match hinge.direction {
+                    sim::FoldDirection::Mountain => base_target,
+                    sim::FoldDirection::Valley => -base_target,
+                };
+            }
+        }
+    });
+}
+
+/// Set the fold amount for all paper hinges (direction-aware).
+///
+/// `degrees` is the fold amount:
+/// - 0°   → flat (no fold)
+/// - 180° → fully folded
+///
+/// Mountain folds decrease dihedral angle, valley folds increase it.
+#[wasm_bindgen]
+pub fn set_paper_fold_amount(degrees: f64) {
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            state.borrow_mut().sim.set_fold_angle(degrees as f32);
+        }
+    });
+}
+
+/// Enable or disable wireframe overlay rendering.
+#[wasm_bindgen]
+pub fn set_wireframe_enabled(enabled: bool) {
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            state.borrow_mut().cloth.wireframe_enabled = enabled;
+        }
+    });
 }
 
 /// Maps "ArrowLeft/Right/Up/Down" to indices 0/1/2/3.
@@ -360,6 +867,25 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 #[wasm_bindgen] pub fn set_bending_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().bending_weight = v); }
 #[wasm_bindgen] pub fn set_pulling_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().pulling_enabled = v); }
 #[wasm_bindgen] pub fn set_pulling_weight(v: f64)    { PARAMS.with(|p| p.borrow_mut().pulling_weight = v); }
+#[wasm_bindgen] pub fn set_self_collision_enabled(v: bool)          { PARAMS.with(|p| p.borrow_mut().self_collision_enabled = v); }
+#[wasm_bindgen] pub fn set_self_collision_threshold(v: f64)         { PARAMS.with(|p| p.borrow_mut().self_collision_threshold = v); }
+#[wasm_bindgen] pub fn set_self_collision_recompute_iters(v: u16)  { PARAMS.with(|p| p.borrow_mut().self_collision_recompute_iters = v); }
+#[wasm_bindgen] pub fn set_use_distance_constraints(v: bool)        { PARAMS.with(|p| p.borrow_mut().use_distance_constraints = v); }
+#[wasm_bindgen] pub fn set_pulling_area(v: u32)    { PARAMS.with(|p| p.borrow_mut().pulling_area = v); }
+#[wasm_bindgen] pub fn set_damping(v: f64)         { PARAMS.with(|p| p.borrow_mut().damping = v); }
+
+#[wasm_bindgen]
+pub fn set_resolution(v: u32) {
+    APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            let new_cloth = Cloth::new(&s.ctx, v, &s.light);
+            let new_sim   = ClothSim::from_cloth(&new_cloth);
+            s.cloth = new_cloth;
+            s.sim   = new_sim;
+        }
+    });
+}
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] { [a[0]-b[0], a[1]-b[1], a[2]-b[2]] }
 fn neg3(a: [f32; 3]) -> [f32; 3] { [-a[0], -a[1], -a[2]] }

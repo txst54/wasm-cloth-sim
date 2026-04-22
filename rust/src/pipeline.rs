@@ -5,6 +5,8 @@ pub struct PipelineBuilder<'a> {
     bind_group_layouts: Vec<Option<&'a wgpu::BindGroupLayout>>,
     format: wgpu::TextureFormat,
     label: Option<&'a str>,
+    topology: wgpu::PrimitiveTopology,
+    depth_bias: wgpu::DepthBiasState,
 }
 
 impl<'a> PipelineBuilder<'a> {
@@ -16,7 +18,19 @@ impl<'a> PipelineBuilder<'a> {
             bind_group_layouts: vec![],
             format,
             label: None,
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            depth_bias: wgpu::DepthBiasState::default(),
         }
+    }
+
+    pub fn topology(mut self, topology: wgpu::PrimitiveTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    pub fn depth_bias(mut self, bias: wgpu::DepthBiasState) -> Self {
+        self.depth_bias = bias;
+        self
     }
 
     pub fn shader(mut self, src: &'a str) -> Self {
@@ -71,10 +85,16 @@ impl<'a> PipelineBuilder<'a> {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
+                topology: self.topology,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: self.depth_bias,
+            }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
             multiview_mask: None,
