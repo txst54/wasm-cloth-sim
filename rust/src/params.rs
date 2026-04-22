@@ -22,10 +22,7 @@ pub struct SimParams {
     /// Distance (world units) below which a vertex is considered in contact with a triangle.
     /// Default ≈ 1.5× the rest edge length for a 64-resolution cloth on [−1, 1].
     pub self_collision_threshold: f64,
-    /// When true, collision pairs are rebuilt every constraint iteration (more accurate,
-    /// catches collisions formed during projection, but slower).
-    /// When false, pairs are built once from predicted positions before the constraint loop.
-    pub self_collision_recompute_pairs: bool,
+    pub self_collision_recompute_iters: u16,
     /// When true, stretch and bending use per-edge distance constraints (fast, O(E)).
     /// When false, they use shape-matching with SVD polar decomposition (slower, higher quality).
     pub use_distance_constraints: bool,
@@ -58,7 +55,7 @@ impl Default for SimParams {
 
             self_collision_enabled:   true,
             self_collision_threshold: 0.02,
-            self_collision_recompute_pairs: false,
+            self_collision_recompute_iters: 1,
             use_distance_constraints: false,
             damping: 0.0,
         }

@@ -15,7 +15,7 @@ import init, {
   set_pulling_weight,
   set_self_collision_enabled,
   set_self_collision_threshold,
-  set_self_collision_recompute_pairs,
+  set_self_collision_recompute_iters,
   set_use_distance_constraints,
   set_resolution,
   set_pulling_area,
@@ -145,19 +145,22 @@ function buildPanel() {
         weightStep: 0.001,
         onWeightChange: set_self_collision_threshold,
       }),
+      new SliderOptions({
+        weight: 1,
+        weightLabel: 'Recompute Iters',
+        weightMin: 1,
+        weightMax: 5,
+        weightStep: 1,
+        onWeightChange: set_self_collision_recompute_iters,
+      })
     ],
   }));
 
-  panel.appendChild(CheckboxRow({
-    label: 'recompute pairs/iter',
-    checked: false,
-    onChange: set_self_collision_recompute_pairs,
-  }));
 
   panel.appendChild(Divider());
 
   panel.appendChild(SliderRow({
-    label: 'resolution', min: 4, max: 128, step: 1, value: 64,
+    label: 'resolution', min: 4, max: 128, step: 1, value: 32,
     onChange: v => set_resolution(Math.round(v)),
   }));
 
