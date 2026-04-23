@@ -973,6 +973,7 @@ impl SimCore {
         let base = params.pulling_weight as f32;
         if let Some(verts) = &self.dragging_vertices {
             for inf in verts {
+                if self.w[inf.vi] == 0.0 { continue; }
                 let target = mp + inf.offset;
                 let qi = self.q.row(inf.vi).transpose();
                 let wt = base * inf.alpha;
@@ -1347,7 +1348,7 @@ impl SimCore {
             let d = dist[v];
             if d > max_hops { continue; }
             let alpha = gaussian_weight(d as f32, 2.0);
-            if alpha > 0.0 {
+            if alpha > 0.0 && self.w[v] > 0.0 {
                 out.push(DragInfluence {
                     vi: v,
                     alpha,

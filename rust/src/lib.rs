@@ -38,8 +38,9 @@ struct AppState {
     sim:    ClothSim,
     params: Rc<RefCell<SimParams>>,
     canvas: HtmlCanvasElement,
-    /// [left, right, up, down] arrow key held state
-    keys:   [bool; 4],
+    /// Held key state: [←, →, ↑, ↓, A, D, W, S].
+    /// Arrows orbit the camera; WASD translates the look-at target.
+    keys:   [bool; 8],
 }
 
 struct PaperAppState {
@@ -50,7 +51,7 @@ struct PaperAppState {
     sim:    PaperSim,
     params: Rc<RefCell<SimParams>>,
     canvas: HtmlCanvasElement,
-    keys:   [bool; 4],
+    keys:   [bool; 8],
 }
 
 #[wasm_bindgen]
@@ -76,7 +77,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         sim,
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
-        keys: [false; 4],
+        keys: [false; 8],
     }));
     APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -257,13 +258,20 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         let mut s = state_inner.borrow_mut();
         let AppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
 
-        // Rotate camera from held arrow keys (~60 fps → 0.02 rad/frame ≈ 1.2 rad/s)
-        const SPEED: f32 = 0.02;
-        if keys[0] { camera.yaw   -= SPEED; }
-        if keys[1] { camera.yaw   += SPEED; }
-        if keys[2] { camera.pitch += SPEED; }
-        if keys[3] { camera.pitch -= SPEED; }
+        // Arrows orbit (~0.02 rad/frame); WASD translate (~0.03 units/frame).
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw   -= ROT_SPEED; }
+        if keys[1] { camera.yaw   += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
         camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd = camera.forward();
+        let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
 
         if keys.iter().any(|&k| k) {
             camera.update(&ctx.queue);
@@ -344,7 +352,7 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
         ctx, cloth, light, camera, sim,
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
-        keys: [false; 4],
+        keys: [false; 8],
     }));
     PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -478,12 +486,19 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
         let mut s = state_inner.borrow_mut();
         let PaperAppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
 
-        const SPEED: f32 = 0.02;
-        if keys[0] { camera.yaw   -= SPEED; }
-        if keys[1] { camera.yaw   += SPEED; }
-        if keys[2] { camera.pitch += SPEED; }
-        if keys[3] { camera.pitch -= SPEED; }
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw   -= ROT_SPEED; }
+        if keys[1] { camera.yaw   += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
         camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd = camera.forward();
+        let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
         if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
 
         sim.step(&params.borrow());
@@ -531,7 +546,7 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
         ctx, cloth, light, camera, sim,
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
-        keys: [false; 4],
+        keys: [false; 8],
     }));
     PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -665,12 +680,19 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
         let mut s = state_inner.borrow_mut();
         let PaperAppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
 
-        const SPEED: f32 = 0.02;
-        if keys[0] { camera.yaw -= SPEED; }
-        if keys[1] { camera.yaw += SPEED; }
-        if keys[2] { camera.pitch += SPEED; }
-        if keys[3] { camera.pitch -= SPEED; }
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw -= ROT_SPEED; }
+        if keys[1] { camera.yaw += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
         camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd = camera.forward();
+        let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
         if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
 
         sim.step(&params.borrow());
@@ -730,14 +752,18 @@ pub fn set_paper_fold_speed(rads_per_sec: f64) {
 /// Mountain and valley folds fold in opposite directions.
 #[wasm_bindgen]
 pub fn set_paper_fold_angle(degrees: f64) {
-    let base_target = degrees as f32 * std::f32::consts::PI / 180.0;
+    let desired_dihedral = degrees as f32 * std::f32::consts::PI / 180.0;
+    // target_angle is the offset from rest_angle (π).
+    // For mountain: goal_dihedral = rest + target, we want goal = desired_dihedral
+    //   so target = desired - π (e.g., 0° → target = -π, 180° → target = 0)
+    // For valley: fold in opposite direction, so target = π - desired
     PAPER_APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
             for hinge in &mut s.sim.hinges {
                 hinge.target_angle = match hinge.direction {
-                    sim::FoldDirection::Mountain => base_target,
-                    sim::FoldDirection::Valley => -base_target,
+                    sim::FoldDirection::Mountain => desired_dihedral - std::f32::consts::PI,
+                    sim::FoldDirection::Valley => std::f32::consts::PI - desired_dihedral,
                 };
             }
         }
@@ -777,6 +803,10 @@ fn arrow_key_index(key: &str) -> Option<usize> {
         "ArrowRight" => Some(1),
         "ArrowUp"    => Some(2),
         "ArrowDown"  => Some(3),
+        "a" | "A"    => Some(4),
+        "d" | "D"    => Some(5),
+        "w" | "W"    => Some(6),
+        "s" | "S"    => Some(7),
         _            => None,
     }
 }

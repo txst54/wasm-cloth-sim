@@ -18,7 +18,7 @@ import init, {
   set_pulling_area,
   set_self_collision_enabled,
   set_damping,
-  set_wireframe_enabled,
+  set_wireframe_enabled, set_use_distance_constraints,
 } from '../rust/pkg/my_webgpu_app.js'
 import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions } from './components.js'
 
@@ -56,7 +56,7 @@ function buildPanel() {
 
   panel.appendChild(SliderRow({
     label: 'angle (°)',
-    min: 0, max: 180, step: 1, value: 0,
+    min: 0, max: 90, step: 1, value: 0,
     onChange: v => set_paper_fold_angle(v),
   }))
 
@@ -84,7 +84,7 @@ function buildPanel() {
   }))
 
   panel.appendChild(SliderRow({
-    label: 'time step', min: 0.001, max: 0.1, step: 0.001, value: 0.01,
+    label: 'time step', min: 0.00001, max: 0.1, step: 0.0001, value: 0.0005,
     onChange: set_time_step,
   }))
 
@@ -148,12 +148,14 @@ function buildPanel() {
 
 init().then(async () => {
   // Paper sim defaults
-  set_gravity_enabled(true)
-  set_self_collision_enabled(false)
+  set_gravity_enabled(false)
+  set_self_collision_enabled(true)
+  // set_use_distance_constraints(true)
   set_bending_enabled(true)
   set_stretch_weight(1.0)
   set_bending_weight(1.0)
   set_constraint_iters(10)
+  set_time_step(0.0005)
   set_damping(0.7)
 
   try {

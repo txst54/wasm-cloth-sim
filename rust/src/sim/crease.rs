@@ -119,8 +119,8 @@ impl CreasePattern {
         crease_res: usize,
         band_width: usize,
     ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<(u32, u32), CreaseType>, Vec<Vec<u32>>) {
-        let grid_spacing = 1.8 / (grid_res - 1) as f64;
-        let crease_spacing = 1.8 / (crease_res - 1) as f64;
+        let grid_spacing = if grid_res > 1 { 1.8 / (grid_res - 1) as f64 } else { 1.8 };
+        let crease_spacing = if crease_res > 1 { 1.8 / (crease_res - 1) as f64 } else { 1.8 };
         let snap_eps = 1e-6;
         let band_dist = band_width as f64 * grid_spacing;
 
@@ -160,14 +160,33 @@ impl CreasePattern {
         };
 
         // 1. Add grid vertices, skip interior points near creases
-        for row in 0..grid_res {
-            for col in 0..grid_res {
-                let x = (col as f64 / (grid_res - 1) as f64) * 1.8 - 0.9;
-                let y = (row as f64 / (grid_res - 1) as f64) * 1.8 - 0.9;
-                let is_boundary = row == 0 || row == grid_res - 1 || col == 0 || col == grid_res - 1;
-                if is_boundary || !near_crease([x, y]) {
+        if grid_res <= 1 {
+            // Just add 4 corners
+            for &x in &[-0.9f64, 0.9] {
+                for &y in &[-0.9f64, 0.9] {
                     add_vertex(&mut unique_verts, [x, y]);
                 }
+            }
+        } else {
+            for row in 0..grid_res {
+                for col in 0..grid_res {
+                    let x = (col as f64 / (grid_res - 1) as f64) * 1.8 - 0.9;
+                    let y = (row as f64 / (grid_res - 1) as f64) * 1.8 - 0.9;
+                    let is_boundary = row == 0 || row == grid_res - 1 || col == 0 || col == grid_res - 1;
+                    if is_boundary || !near_crease([x, y]) {
+                        add_vertex(&mut unique_verts, [x, y]);
+                    }
+                }
+            }
+        }
+
+        // 1b. Add all crease line endpoint vertices (ensures edge vertices are in the mesh)
+        for &(p1, p2, _) in &split_creases {
+            if p1[0] >= -0.9 && p1[0] <= 0.9 && p1[1] >= -0.9 && p1[1] <= 0.9 {
+                add_vertex(&mut unique_verts, p1);
+            }
+            if p2[0] >= -0.9 && p2[0] <= 0.9 && p2[1] >= -0.9 && p2[1] <= 0.9 {
+                add_vertex(&mut unique_verts, p2);
             }
         }
 
@@ -181,7 +200,7 @@ impl CreasePattern {
             let nx = -(p2[1] - p1[1]) / len;
             let ny = (p2[0] - p1[0]) / len;
 
-            let num_along = ((len / crease_spacing).ceil() as usize).max(2);
+            let num_along = ((len / crease_spacing).ceil() as usize).max(1);
             let num_perp = if band_width > 0 {
                 ((band_dist / crease_spacing).ceil() as usize).max(1)
             } else {
@@ -222,7 +241,7 @@ impl CreasePattern {
             let len = (dx*dx + dy*dy).sqrt();
             if len < 1e-10 { continue; }
 
-            let num_points = ((len / crease_spacing).ceil() as usize).max(2);
+            let num_points = ((len / crease_spacing).ceil() as usize).max(1);
             let mut chain_indices: Vec<usize> = Vec::new();
 
             for i in 0..=num_points {

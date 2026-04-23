@@ -59,13 +59,25 @@ pub struct HingeConstraint {
 
 // ── PaperSim ──────────────────────────────────────────────────────────────────
 
+/// A 3-vertex constraint that keeps interior crease vertices on the line
+/// between their neighbors.  Unlike the old collinearity constraint this
+/// moves all three vertices (weighted by inverse mass) and accumulates a
+/// proper XPBD Lagrange multiplier, making it much stiffer at high fold
+/// angles.
+pub struct CreaseBendConstraint {
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    pub lambda: f32,
+}
+
 pub struct PaperSim {
     pub core: SimCore,
     pub hinges: Vec<HingeConstraint>,
     pub fold_speed: f32,
     pub crease_chains: Vec<Vec<u32>>,
-    pub collinearity_compliance: f32,
-    pub collinearity_lambdas: Vec<f32>,
+    pub crease_bend_compliance: f32,
+    pub crease_bends: Vec<CreaseBendConstraint>,
 }
 
 impl Deref for PaperSim {
@@ -87,15 +99,15 @@ impl PaperSim {
             hinges: Vec::new(),
             fold_speed: 5.0,
             crease_chains: Vec::new(),
-            collinearity_compliance: 1e-4,
-            collinearity_lambdas: Vec::new(),
+            crease_bend_compliance: 1e-6,
+            crease_bends: Vec::new(),
         }
     }
 
     /// Create PaperSim from a crease pattern overlaid on a 64x64 grid.
     /// Returns (PaperSim, positions, faces, colors) for building Cloth.
     pub fn from_crease_pattern(cp: &CreasePattern) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
-        const GRID_RES: usize = 32;
+        const GRID_RES: usize = 1;
         let (positions, faces, fold_edges, crease_chains) = cp.build_mesh(GRID_RES);
 
         // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
@@ -124,20 +136,25 @@ impl PaperSim {
         }
 
         // Build SimCore from mesh with top corner pinned
-        let core = SimCore::from_mesh(&positions, &faces, &[pin_idx]);
+        let core = SimCore::from_mesh(&positions, &faces, &[]);
 
-        // Count collinearity interior vertices for lambda storage
-        let num_collinearity = crease_chains.iter()
-            .map(|c| c.len().saturating_sub(2))
-            .sum();
+        // Build crease-bend triples from chains: for each consecutive (A,B,C),
+        // B is the interior vertex that should stay on line AC.
+        let crease_bends: Vec<CreaseBendConstraint> = crease_chains.iter()
+            .flat_map(|chain| {
+                chain.windows(3).map(|w| CreaseBendConstraint {
+                    a: w[0], b: w[1], c: w[2], lambda: 0.0,
+                })
+            })
+            .collect();
 
         let mut sim = Self {
             core,
             hinges: Vec::new(),
             fold_speed: 5.0,
             crease_chains,
-            collinearity_compliance: 1e-4,
-            collinearity_lambdas: vec![0.0; num_collinearity],
+            crease_bend_compliance: 1e-6,
+            crease_bends,
         };
 
         // Build fold map from crease pattern edges
@@ -240,10 +257,10 @@ impl PaperSim {
         // 2. Reset all lambdas
         self.core.reset_lambdas();
         for h in &mut self.hinges { h.lambda = 0.0; }
-        for cl in &mut self.collinearity_lambdas { *cl = 0.0; }
+        for cb in &mut self.crease_bends { cb.lambda = 0.0; }
 
         // 3. Unified XPBD iteration loop
-        let col_alpha_tilde = self.collinearity_compliance / (dt * dt);
+        let cb_alpha_tilde = self.crease_bend_compliance / (dt * dt);
         for _ in 0..params.constraint_iters {
             self.core.solve_stretch(params);
             self.core.solve_bend(params, &skip);
@@ -263,31 +280,20 @@ impl PaperSim {
                 );
             }
 
-            // Collinearity constraints
-            let mut cl_idx = 0;
-            for chain in &self.crease_chains {
-                if chain.len() < 3 {
-                    cl_idx += chain.len().saturating_sub(2);
-                    continue;
-                }
-                let a = chain[0];
-                let b = chain[chain.len() - 1];
-                for &vi in &chain[1..chain.len()-1] {
-                    apply_collinearity_xpbd(
-                        &mut self.core.q, &self.core.w,
-                        vi as usize, a as usize, b as usize,
-                        col_alpha_tilde, &mut self.collinearity_lambdas[cl_idx],
-                    );
-                    cl_idx += 1;
-                }
-            }
-
+            // // Crease-bend constraints (keep crease lines straight)
+            // for cb in &mut self.crease_bends {
+            //     apply_crease_bend_xpbd(
+            //         &mut self.core.q, &self.core.w,
+            //         cb.a as usize, cb.b as usize, cb.c as usize,
+            //         cb_alpha_tilde, &mut cb.lambda,
+            //     );
+            // }
         }
 
         self.core.solve_self_collision(params);
 
         // 4. Remove rigid-body rotation from constraint corrections
-        self.core.remove_rigid_rotation();
+        // self.core.remove_rigid_rotation();
 
         // 5. Derive velocity from position change
         self.core.update_velocity(params);
@@ -376,6 +382,17 @@ fn apply_hinge_xpbd(
     let dl = -(c_val + alpha_tilde * *lambda) / denom;
     *lambda += dl;
 
+    // Debug: log every ~3000 calls
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count % 3000 == 0 {
+        console::log_1(&format!(
+            "θ={:.3} goal={:.3} c={:.4} dl={:.6} |g|={:.3},{:.3},{:.3},{:.3} α̃={:.2e}",
+            theta, goal_angle, c_val, dl,
+            g_a.norm(), g_b.norm(), g_c.norm(), g_d.norm(), alpha_tilde
+        ).into());
+    }
+
     add_scaled(q, a, wa * dl * g_a);
     add_scaled(q, b, wb * dl * g_b);
     add_scaled(q, c, wc * dl * g_c);
@@ -383,58 +400,59 @@ fn apply_hinge_xpbd(
 }
 
 
-// ── XPBD collinearity constraint ──────────────────────────────────────────────
+// ── XPBD crease-bend constraint ──────────────────────────────────────────────
 
-/// XPBD constraint that pushes vertex `p` toward the line defined by endpoints `a` and `b`.
-/// C = distance from p to line ab.
-/// Only moves vertex p (endpoints are assumed fixed by hinge constraints).
-fn apply_collinearity_xpbd(
+/// 3-body XPBD constraint: keeps vertex B on the line through A and C.
+///
+/// C = perpendicular distance from B to line AC.
+///
+/// Gradients (exact):
+///   ∂C/∂A = -(1-t) n̂,   ∂C/∂B = n̂,   ∂C/∂C = -t n̂
+///
+/// where t = projection parameter of B onto AC and n̂ = unit perpendicular.
+/// All three vertices move, weighted by inverse mass, so the crease stays
+/// stiff even when A and C are light.
+fn apply_crease_bend_xpbd(
     q:           &mut Positions,
     w:           &na::DVector<f32>,
-    p: usize, a: usize, b: usize,
+    a: usize, b: usize, c: usize,
     alpha_tilde: f32,
     lambda:      &mut f32,
 ) {
-    let wp = w[p];
-    if wp < 1e-12 { return; }
-
     let pa = row3(q, a);
     let pb = row3(q, b);
-    let pp = row3(q, p);
+    let pc = row3(q, c);
 
-    let edge = pb - pa;
+    let edge = pc - pa;
     let edge_len_sq = edge.norm_squared();
     if edge_len_sq < 1e-12 { return; }
 
-    // Vector from a to p
-    let v = pp - pa;
-
-    // Project p onto line ab: proj = pa + t * edge
+    let v = pb - pa;
     let t = v.dot(&edge) / edge_len_sq;
     let proj = pa + t * edge;
-
-    // Perpendicular vector from line to p
-    let perp = pp - proj;
+    let perp = pb - proj;
     let dist = perp.norm();
 
     if dist < 1e-6 { return; }
 
-    // Constraint value C = distance to line
+    let n_hat = perp / dist;
     let c_val = dist;
 
-    // Gradient: unit vector pointing from line toward p
-    let grad = perp / dist;
+    let wa = w[a]; let wb = w[b]; let wc = w[c];
 
-    // XPBD: Δλ = -(C + α̃λ) / (w|∇C|² + α̃)
-    // Since |∇C| = 1: denom = w + α̃
-    let denom = wp + alpha_tilde;
+    let ga = -(1.0 - t);
+    let gb = 1.0;
+    let gc = -t;
+
+    let denom = wa * ga * ga + wb * gb * gb + wc * gc * gc + alpha_tilde;
     if denom < 1e-12 { return; }
 
     let dl = -(c_val + alpha_tilde * *lambda) / denom;
     *lambda += dl;
 
-    // Move p toward the line
-    add_scaled(q, p, wp * dl * grad);
+    add_scaled(q, a, wa * dl * ga * n_hat);
+    add_scaled(q, b, wb * dl * gb * n_hat);
+    add_scaled(q, c, wc * dl * gc * n_hat);
 }
 
 // ── Tiny inline utilities ─────────────────────────────────────────────────────

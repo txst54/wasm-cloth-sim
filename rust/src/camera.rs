@@ -16,6 +16,8 @@ pub struct Camera {
     pub pitch: f32,   // vertical rotation (radians)
     pub dist:   f32,
     pub aspect: f32,
+    /// Orbit target / look-at point (translated by WASD).
+    pub target: [f32; 3],
     /// World-space eye position (updated on every `update()` call).
     pub eye: [f32; 3],
     /// Inverse view-projection in row-major order — used for CPU-side unprojection.
@@ -31,8 +33,9 @@ impl Camera {
         let yaw   = 0.3f32;
         let pitch = 0.3f32;
         let dist  = 2.0f32;
+        let target = [0.0, 0.0, 0.0];
 
-        let built = Self::build(yaw, pitch, dist, aspect);
+        let built = Self::build(yaw, pitch, dist, target, aspect);
 
         let uniform_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera UB"),
@@ -66,7 +69,7 @@ impl Camera {
         });
 
         Self {
-            yaw, pitch, dist, aspect,
+            yaw, pitch, dist, aspect, target,
             eye: built.eye,
             inv_view_proj: built.inv_view_proj,
             bind_group_layout, bind_group, uniform_buffer,
@@ -74,26 +77,40 @@ impl Camera {
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue) {
-        let built = Self::build(self.yaw, self.pitch, self.dist, self.aspect);
+        let built = Self::build(self.yaw, self.pitch, self.dist, self.target, self.aspect);
         self.eye           = built.eye;
         self.inv_view_proj = built.inv_view_proj;
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&built.uniform));
     }
 
-    fn build(yaw: f32, pitch: f32, dist: f32, aspect: f32) -> Built {
+    /// Unit forward vector (from eye toward target) in world space.
+    pub fn forward(&self) -> [f32; 3] {
+        normalize3([
+            -self.pitch.cos() * self.yaw.sin(),
+            -self.pitch.sin(),
+            -self.pitch.cos() * self.yaw.cos(),
+        ])
+    }
+
+    /// Unit right vector orthogonal to forward and world up.
+    pub fn right(&self) -> [f32; 3] {
+        normalize3(cross3(self.forward(), [0.0, 1.0, 0.0]))
+    }
+
+    fn build(yaw: f32, pitch: f32, dist: f32, target: [f32; 3], aspect: f32) -> Built {
         let eye = [
-            pitch.cos() * yaw.sin() * dist,
-            pitch.sin() * dist,
-            pitch.cos() * yaw.cos() * dist,
+            target[0] + pitch.cos() * yaw.sin() * dist,
+            target[1] + pitch.sin() * dist,
+            target[2] + pitch.cos() * yaw.cos() * dist,
         ];
 
         // ── GPU-side: column-major view-projection ────────────────────────────
-        let view_cm = look_at_col(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let view_cm = look_at_col(eye, target, [0.0, 1.0, 0.0]);
         let proj_cm = perspective_col(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
         let view_proj_cm = mat4_mul_col(proj_cm, view_cm);
 
         // ── CPU-side: row-major inverse view-projection ───────────────────────
-        let inv_view_rm = inv_look_at_row(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let inv_view_rm = inv_look_at_row(eye, target, [0.0, 1.0, 0.0]);
         let inv_proj_rm = inv_perspective_row(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
         let inv_vp_rm   = mat4_mul_row(inv_view_rm, inv_proj_rm);
 
