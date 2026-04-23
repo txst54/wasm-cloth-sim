@@ -344,7 +344,7 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
         let a = (row * n + col) as u32;
         let b = ((row + 1) * n + col) as u32;
         let lo = a.min(b); let hi = a.max(b);
-        fold_map.insert((lo, hi), FoldSpec { target_angle: std::f32::consts::PI, compliance: 1e-4, direction: FoldDirection::Mountain });
+        fold_map.insert((lo, hi), FoldSpec { target_angle: std::f32::consts::PI, compliance: 1e-4, direction: FoldDirection::Mountain, damping: 0.5 });
     }
     sim.set_fold_map(fold_map);
 
@@ -725,6 +725,21 @@ pub fn set_paper_hinge_compliance(alpha: f64) {
             let mut s = state.borrow_mut();
             for hinge in &mut s.sim.hinges {
                 hinge.compliance = alpha as f32;
+            }
+        }
+    });
+}
+
+/// Set XPBD constraint damping for all paper hinges.
+/// Higher = more damping of angular velocity along constraint gradient (0 … 10 typical).
+/// Default 0.5; set to 0 for no additional constraint damping.
+#[wasm_bindgen]
+pub fn set_paper_hinge_damping(beta: f64) {
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            for hinge in &mut s.sim.hinges {
+                hinge.damping = beta as f32;
             }
         }
     });

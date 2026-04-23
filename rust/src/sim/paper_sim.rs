@@ -30,6 +30,10 @@ pub struct FoldSpec {
     pub compliance: f32,
     /// Direction of fold (mountain vs valley).
     pub direction: FoldDirection,
+    /// XPBD constraint damping β (stiffness, not inverse).
+    /// Damps velocity along the constraint gradient.  Typical range: 0 … 10.
+    /// Default 0 means no additional damping beyond implicit numerical damping.
+    pub damping: f32,
 }
 
 // ── HingeConstraint ───────────────────────────────────────────────────────────
@@ -53,6 +57,8 @@ pub struct HingeConstraint {
     pub current_angle: f32,
     pub compliance: f32,
     pub direction: FoldDirection,
+    /// XPBD constraint damping β (stiffness, not inverse).
+    pub damping: f32,
     /// XPBD Lagrange multiplier (reset each substep).
     pub lambda: f32,
 }
@@ -107,7 +113,7 @@ impl PaperSim {
     /// Create PaperSim from a crease pattern overlaid on a 64x64 grid.
     /// Returns (PaperSim, positions, faces, colors) for building Cloth.
     pub fn from_crease_pattern(cp: &CreasePattern) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
-        const GRID_RES: usize = 1;
+        const GRID_RES: usize = 16;
         let (positions, faces, fold_edges, crease_chains) = cp.build_mesh(GRID_RES);
 
         // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
@@ -170,6 +176,7 @@ impl PaperSim {
                 target_angle: 0.0,  // start flat (0 = unfolded)
                 compliance: 1e-4,
                 direction,
+                damping: 0.5,
             });
         }
         sim.set_fold_map(fold_map);
@@ -203,6 +210,7 @@ impl PaperSim {
                     current_angle: 0.0,
                     compliance: spec.compliance,
                     direction: spec.direction,
+                    damping: spec.damping,
                     lambda: 0.0,
                 });
             } else {
@@ -267,16 +275,18 @@ impl PaperSim {
             self.core.solve_pins(params);
             self.core.solve_pulling(params);
 
-            // Hinge dihedral constraints
+            // Hinge dihedral constraints with XPBD damping
             for h in &mut self.hinges {
                 let [a, b, c, d] = self.core.diamonds[h.diamond_idx];
                 let alpha_tilde = h.compliance / (dt * dt);
+                // γ = α̃ β̃ / Δt = (compliance/dt²)(dt²·damping)/dt = compliance·damping/dt
+                let gamma = h.compliance * h.damping / dt;
                 let goal_dihedral = h.rest_angle + h.current_angle;
 
                 apply_hinge_xpbd(
-                    &mut self.core.q, &self.core.w,
+                    &mut self.core.q, &self.core.q_prev, &self.core.w,
                     a as usize, b as usize, c as usize, d as usize,
-                    goal_dihedral, alpha_tilde, &mut h.lambda,
+                    goal_dihedral, alpha_tilde, gamma, &mut h.lambda,
                 );
             }
 
@@ -314,25 +324,28 @@ impl MeshSim for PaperSim {
 
 // ── XPBD dihedral-angle constraint ───────────────────────────────────────────
 
-/// XPBD dihedral-angle constraint (Müller et al. 2020).
+/// XPBD dihedral-angle constraint with Rayleigh damping (Macklin et al. 2016 §5).
 ///
 /// Unlike plain PBD this accumulates the Lagrange multiplier `λ` across
 /// iterations within the same substep, which prevents the large-angle
 /// overcorrection that caused divergence under the old PBD formulation.
 ///
-/// Formula:
+/// Damped formula (equation 26 from the paper):
 /// ```text
-/// Δλ = -(C + α̃ λ) / (Σ wᵢ |∇C|² + α̃)
+/// γ = α̃ β̃ / Δt = compliance · damping / dt
+/// Δλ = -(C + α̃ λ + γ ∇C·(x - x^n)) / ((1+γ) Σ wᵢ |∇C|² + α̃)
 /// λ  += Δλ
 /// Δpᵢ = wᵢ Δλ ∇C_i
 /// ```
-/// where `α̃ = α / dt²` and the constraint `C = θ − θ_goal`.
+/// where `α̃ = α / dt²`, `β̃ = dt² β`, and the constraint `C = θ − θ_goal`.
 fn apply_hinge_xpbd(
     q:           &mut Positions,
+    q_prev:      &Positions,
     w:           &na::DVector<f32>,
     a: usize, b: usize, c: usize, d: usize,
     goal_angle:  f32,
     alpha_tilde: f32,   // compliance / dt²
+    gamma:       f32,   // compliance * damping / dt
     lambda:      &mut f32,
 ) {
     let p1 = row3(q, a); let p2 = row3(q, b);
@@ -351,14 +364,15 @@ fn apply_hinge_xpbd(
 
     let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
     let sin_t = n1h.cross(&n2h).dot(&e_hat);
-    let theta = sin_t.atan2(cos_t);
+    let raw_theta = sin_t.atan2(cos_t);
+    // Shift by π so flat = 0 (matching dihedral_angle convention)
+    let theta = {
+        let shifted = raw_theta + std::f32::consts::PI;
+        (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
+    };
 
-    let mut c_val = theta - goal_angle;
-    // Wrap to [-π, π] for shortest angular path (handles ±π equivalence)
-    let mut c_val = theta - goal_angle;
-    c_val = (c_val + std::f32::consts::PI)
-        .rem_euclid(2.0 * std::f32::consts::PI)
-        - std::f32::consts::PI;
+    // C = θ - goal, already in [-π, π] range
+    let c_val = theta - goal_angle;
     if c_val.abs() < 1e-4 { return; }
 
     // Gradients ∂θ/∂pᵢ  (same derivation as PBD bending, Müller 2006 §4)
@@ -371,15 +385,22 @@ fn apply_hinge_xpbd(
 
     let wa = w[a]; let wb = w[b]; let wc = w[c]; let wd = w[d];
 
-    // XPBD denominator includes compliance term, bounding per-iteration correction.
+    // Damping term: γ ∇C·(x - x^n)
+    let dx_a = p1 - row3(q_prev, a);
+    let dx_b = p2 - row3(q_prev, b);
+    let dx_c = p3 - row3(q_prev, c);
+    let dx_d = p4 - row3(q_prev, d);
+    let grad_dot_dx = g_a.dot(&dx_a) + g_b.dot(&dx_b) + g_c.dot(&dx_c) + g_d.dot(&dx_d);
+
+    // XPBD denominator includes compliance and damping terms
     let weighted_grads = wa * g_a.norm_squared()
                        + wb * g_b.norm_squared()
                        + wc * g_c.norm_squared()
                        + wd * g_d.norm_squared();
-    let denom = weighted_grads + alpha_tilde;
+    let denom = (1.0 + gamma) * weighted_grads + alpha_tilde;
     if denom < 1e-12 { return; }
 
-    let dl = -(c_val + alpha_tilde * *lambda) / denom;
+    let dl = -(c_val + alpha_tilde * *lambda + gamma * grad_dot_dx) / denom;
     *lambda += dl;
 
     // Debug: log every ~3000 calls
@@ -387,9 +408,8 @@ fn apply_hinge_xpbd(
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if count % 3000 == 0 {
         console::log_1(&format!(
-            "θ={:.3} goal={:.3} c={:.4} dl={:.6} |g|={:.3},{:.3},{:.3},{:.3} α̃={:.2e}",
-            theta, goal_angle, c_val, dl,
-            g_a.norm(), g_b.norm(), g_c.norm(), g_d.norm(), alpha_tilde
+            "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
+            theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
         ).into());
     }
 
@@ -462,20 +482,26 @@ fn normalise_edge(a: u32, b: u32) -> (u32, u32) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+/// Compute dihedral "fold angle" for a diamond.
+/// Returns 0 for a flat mesh, negative for mountain folds, positive for valley folds.
+/// Range: [-π, π]
 fn dihedral_angle(q: &Positions, a: u32, b: u32, c: u32, d: u32) -> f32 {
     let p1 = row3(q, a as usize); let p2 = row3(q, b as usize);
     let p3 = row3(q, c as usize); let p4 = row3(q, d as usize);
     let e = p2 - p1;
     let e_len = e.norm();
-    if e_len < 1e-8 { return std::f32::consts::PI; }
+    if e_len < 1e-8 { return 0.0; }
     let e_hat = e / e_len;
     let n1 = (p2 - p1).cross(&(p3 - p1));
     let n2 = (p2 - p1).cross(&(p4 - p1));
     let n1l = n1.norm(); let n2l = n2.norm();
-    if n1l < 1e-8 || n2l < 1e-8 { return std::f32::consts::PI; }
+    if n1l < 1e-8 || n2l < 1e-8 { return 0.0; }
     let n1h = n1 / n1l; let n2h = n2 / n2l;
     let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
-    n1h.cross(&n2h).dot(&e_hat).atan2(cos_t)
+    let raw = n1h.cross(&n2h).dot(&e_hat).atan2(cos_t);
+    // Shift by π so flat (raw = ±π) becomes 0, and normalize to [-π, π]
+    let shifted = raw + std::f32::consts::PI;
+    (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
 }
 
 #[inline]

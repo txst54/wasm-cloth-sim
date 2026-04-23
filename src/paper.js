@@ -5,6 +5,7 @@ import init, {
   set_paper_fold_angle,
   set_paper_fold_speed,
   set_paper_hinge_compliance,
+  set_paper_hinge_damping,
   set_time_step,
   set_constraint_iters,
   set_gravity_enabled,
@@ -72,6 +73,13 @@ function buildPanel() {
     label: 'compliance (1e-x)',
     min: 2, max: 6, step: 0.1, value: 4,
     onChange: v => set_paper_hinge_compliance(Math.pow(10, -v)),
+  }))
+
+  // XPBD constraint damping for hinges
+  panel.appendChild(SliderRow({
+    label: 'hinge damping',
+    min: 0, max: 5, step: 0.1, value: 0.5,
+    onChange: set_paper_hinge_damping,
   }))
 
   panel.appendChild(Divider())
