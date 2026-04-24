@@ -5,7 +5,7 @@ use nalgebra as na;
 use web_sys::console;
 
 use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
-use super::shared::{Positions, SimCore};
+use super::shared::{Positions, ClothSimCore};
 use super::traits::MeshSim;
 use super::crease::{CreasePattern, CreaseType};
 
@@ -72,7 +72,7 @@ pub struct CreaseBendConstraint {
 }
 
 pub struct PaperSim {
-    pub core: SimCore,
+    pub core: ClothSimCore,
     pub hinges: Vec<HingeConstraint>,
     pub fold_speed: f32,
     pub crease_chains: Vec<Vec<u32>>,
@@ -81,12 +81,12 @@ pub struct PaperSim {
 }
 
 impl Deref for PaperSim {
-    type Target = SimCore;
-    fn deref(&self) -> &SimCore { &self.core }
+    type Target = ClothSimCore;
+    fn deref(&self) -> &ClothSimCore { &self.core }
 }
 
 impl DerefMut for PaperSim {
-    fn deref_mut(&mut self) -> &mut SimCore { &mut self.core }
+    fn deref_mut(&mut self) -> &mut ClothSimCore { &mut self.core }
 }
 
 impl PaperSim {
@@ -94,7 +94,7 @@ impl PaperSim {
         Self {
             core: {
                 let n = cloth.resolution as usize;
-                SimCore::from_cloth(cloth, &[(n-1)*n + (n-1)]) // upper-right only
+                ClothSimCore::from_cloth(cloth, &[(n-1)*n + (n-1)]) // upper-right only
             },
             hinges: Vec::new(),
             fold_speed: 5.0,
@@ -136,7 +136,7 @@ impl PaperSim {
         }
 
         // Build SimCore from mesh with top corner pinned
-        let core = SimCore::from_mesh(&positions, &faces, &[]);
+        let core = ClothSimCore::from_mesh(&positions, &faces, &[]);
 
         // Build crease-bend triples from chains: for each consecutive (A,B,C),
         // B is the interior vertex that should stay on line AC.

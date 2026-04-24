@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
 use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
-use super::shared::{Positions, SimCore};
+use super::shared::{Positions, ClothSimCore};
 use super::traits::MeshSim;
 
 /// Plain cloth simulation — full PBD with stretch, bending, pin, pull, and
@@ -10,23 +10,23 @@ use super::traits::MeshSim;
 /// no extra data, but `Deref` / `DerefMut` let callers access `q`,
 /// `clicked_vertex`, `mouse_pos`, etc. directly (maintaining the old API).
 pub struct ClothSim {
-    pub core: SimCore,
+    pub core: ClothSimCore,
 }
 
 impl Deref for ClothSim {
-    type Target = SimCore;
-    fn deref(&self) -> &SimCore { &self.core }
+    type Target = ClothSimCore;
+    fn deref(&self) -> &ClothSimCore { &self.core }
 }
 
 impl DerefMut for ClothSim {
-    fn deref_mut(&mut self) -> &mut SimCore { &mut self.core }
+    fn deref_mut(&mut self) -> &mut ClothSimCore { &mut self.core }
 }
 
 impl ClothSim {
     pub fn from_cloth(cloth: &Cloth) -> Self {
         let n = cloth.resolution as usize;
         let pinned = vec![(n-1)*n, (n-1)*n + (n-1)]; // upper-left, upper-right
-        Self { core: SimCore::from_cloth(cloth, &pinned) }
+        Self { core: ClothSimCore::from_cloth(cloth, &pinned) }
     }
 
     pub fn step(&mut self, params: &SimParams) {

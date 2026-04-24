@@ -7,6 +7,7 @@ mod light;
 mod params;
 mod sim;
 mod bvh;
+pub mod rigid_body;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,17 +18,22 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent, TouchEvent};
 
+use nalgebra as na;
+
 use camera::Camera;
 use cloth::Cloth;
 use gpu::GpuContext;
 use light::Light;
 use params::SimParams;
-use sim::{ClothSim, CreasePattern, CreaseType, FoldDirection, FoldSpec, PaperSim};
+use rigid_body::{RigidBodyInstance, RigidBodyTemplate};
+use sim::{ClothSim, CreasePattern, CreaseType, FoldDirection, FoldSpec, PaperSim, RigidSimCore, RigidSimParams};
 
 thread_local! {
     static PARAMS: Rc<RefCell<SimParams>> = Rc::new(RefCell::new(SimParams::default()));
     static APP_STATE: RefCell<Option<Rc<RefCell<AppState>>>> = RefCell::new(None);
     static PAPER_APP_STATE: RefCell<Option<Rc<RefCell<PaperAppState>>>> = RefCell::new(None);
+    static RIGID_APP_STATE: RefCell<Option<Rc<RefCell<RigidAppState>>>> = RefCell::new(None);
+    static COMBINED_APP_STATE: RefCell<Option<Rc<RefCell<CombinedAppState>>>> = RefCell::new(None);
 }
 
 struct AppState {
@@ -54,8 +60,287 @@ struct PaperAppState {
     keys:   [bool; 8],
 }
 
+struct RigidAppState {
+    ctx:    GpuContext,
+    cloth:  Cloth,
+    light:  Light,
+    camera: Camera,
+    sim:    RigidSimCore,
+    params: RigidSimParams,
+    canvas: HtmlCanvasElement,
+    keys:   [bool; 8],
+}
+
+struct CombinedAppState {
+    ctx:          GpuContext,
+    cloth:        Cloth,
+    cube_cloth:   Cloth,
+    light:        Light,
+    camera:       Camera,
+    cloth_sim:    ClothSim,
+    rigid_sim:    RigidSimCore,
+    rigid_params: RigidSimParams,
+    params:       Rc<RefCell<SimParams>>,
+    canvas:       HtmlCanvasElement,
+    keys:         [bool; 8],
+}
+
+/// Run cloth and a spinning cube together on the same canvas.
+/// They are simulated independently (no interaction yet).
+/// Mouse drag picks cloth vertices; arrow keys / WASD orbit the camera.
 #[wasm_bindgen]
 pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    let window = web_sys::window().unwrap();
+    let canvas = window
+        .document().unwrap()
+        .get_element_by_id(canvas_id).unwrap()
+        .dyn_into::<HtmlCanvasElement>().unwrap();
+
+    let ctx    = GpuContext::new(canvas.clone()).await?;
+    let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
+    let camera = Camera::new(&ctx);
+
+    // ── Cloth sim ──────────────────────────────────────────────────────────
+    let cloth     = Cloth::new(&ctx, 32, &light);
+    let cloth_sim = ClothSim::from_cloth(&cloth);
+
+    // ── Rigid body: spinning cube ──────────────────────────────────────────
+    const H: f32 = 0.125;
+    let cube_verts: &[[f32; 3]] = &[
+        [-H, -H, -H], [ H, -H, -H], [ H,  H, -H], [-H,  H, -H],
+        [-H, -H,  H], [ H, -H,  H], [ H,  H,  H], [-H,  H,  H],
+    ];
+    let cube_faces: &[[u32; 3]] = &[
+        [4, 5, 6], [4, 6, 7], // +Z
+        [1, 0, 3], [1, 3, 2], // -Z
+        [0, 4, 7], [0, 7, 3], // -X
+        [5, 1, 2], [5, 2, 6], // +X
+        [7, 6, 2], [7, 2, 3], // +Y
+        [0, 1, 5], [0, 5, 4], // -Y
+    ];
+    let template = RigidBodyTemplate::new(cube_verts, cube_faces);
+    let body = RigidBodyInstance::new(
+        template,
+        na::Vector3::zeros(),                // same origin as cloth
+        na::Vector3::zeros(),
+        na::Vector3::zeros(),
+        na::Vector3::new(1.0, 2.0, 0.5),    // initial angular velocity (rad/s)
+        1000.0,
+    );
+    let rigid_sim    = RigidSimCore::new(vec![body]);
+    let rigid_params = RigidSimParams { gravity_enabled: false, ..Default::default() };
+    let cube_cloth   = Cloth::from_mesh(
+        &ctx,
+        cube_verts.to_vec(),
+        cube_faces.to_vec(),
+        vec![[0.72, 0.53, 0.30]; 8],
+        HashMap::new(),
+        &light,
+    );
+
+    let fps_div = window.document().unwrap().create_element("div").unwrap();
+    fps_div.set_inner_html("FPS: 0");
+    fps_div.set_attribute("style",
+        "position:fixed; top:10px; left:10px; color:white; font-family:monospace; z-index:1000;"
+    ).unwrap();
+    window.document().unwrap().body().unwrap().append_child(&fps_div).unwrap();
+
+    let state = Rc::new(RefCell::new(CombinedAppState {
+        ctx, cloth, cube_cloth, light, camera,
+        cloth_sim, rigid_sim, rigid_params,
+        params: PARAMS.with(|p| p.clone()),
+        canvas: canvas.clone(), keys: [false; 8],
+    }));
+    COMBINED_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    fn to_ndc(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let w = canvas.offset_width()  as f32;
+        let h = canvas.offset_height() as f32;
+        ( (event.offset_x() as f32 / w) * 2.0 - 1.0,
+         -(event.offset_y() as f32 / h) * 2.0 + 1.0)
+    }
+
+    fn to_ndc_touch(touch: &web_sys::Touch, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let rect = canvas.get_bounding_client_rect();
+        let ox = touch.client_x() as f32 - rect.left() as f32;
+        let oy = touch.client_y() as f32 - rect.top()  as f32;
+        ( (ox / rect.width()  as f32) * 2.0 - 1.0,
+         -(oy / rect.height() as f32) * 2.0 + 1.0)
+    }
+
+    // Mouse drag — picks cloth vertices only
+    let state_md = state.clone();
+    let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_md.borrow_mut();
+        let (nx, ny) = to_ndc(&e, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.cloth_sim.q.nrows() {
+            let wp = [s.cloth_sim.q[(i,0)], s.cloth_sim.q[(i,1)], s.cloth_sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.cloth_sim.q[(best_idx,0)], s.cloth_sim.q[(best_idx,1)], s.cloth_sim.q[(best_idx,2)]];
+        s.cloth_sim.clicked_vertex    = Some(best_idx);
+        s.cloth_sim.dragging_vertices = None;
+        s.cloth_sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())?;
+    mousedown.forget();
+
+    let state_mm = state.clone();
+    let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_mm.borrow_mut();
+        if let Some(v) = s.cloth_sim.clicked_vertex {
+            let (nx, ny) = to_ndc(&e, &s.canvas);
+            let cp = [s.cloth_sim.q[(v,0)], s.cloth_sim.q[(v,1)], s.cloth_sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.cloth_sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
+    mousemove.forget();
+
+    let state_mu = state.clone();
+    let mouseup = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |_: MouseEvent| {
+        state_mu.borrow_mut().cloth_sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())?;
+    mouseup.forget();
+
+    let state_ts = state.clone();
+    let touchstart = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_ts.borrow_mut();
+        let (nx, ny) = to_ndc_touch(&touch, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.cloth_sim.q.nrows() {
+            let wp = [s.cloth_sim.q[(i,0)], s.cloth_sim.q[(i,1)], s.cloth_sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.cloth_sim.q[(best_idx,0)], s.cloth_sim.q[(best_idx,1)], s.cloth_sim.q[(best_idx,2)]];
+        s.cloth_sim.clicked_vertex = Some(best_idx);
+        s.cloth_sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("touchstart", touchstart.as_ref().unchecked_ref())?;
+    touchstart.forget();
+
+    let state_tm = state.clone();
+    let touchmove = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |e: TouchEvent| {
+        e.prevent_default();
+        let touch = match e.touches().get(0) { Some(t) => t, None => return };
+        let mut s = state_tm.borrow_mut();
+        if let Some(v) = s.cloth_sim.clicked_vertex {
+            let (nx, ny) = to_ndc_touch(&touch, &s.canvas);
+            let cp = [s.cloth_sim.q[(v,0)], s.cloth_sim.q[(v,1)], s.cloth_sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.cloth_sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("touchmove", touchmove.as_ref().unchecked_ref())?;
+    touchmove.forget();
+
+    let state_te = state.clone();
+    let touchend = Closure::<dyn FnMut(TouchEvent)>::wrap(Box::new(move |_: TouchEvent| {
+        state_te.borrow_mut().cloth_sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("touchend", touchend.as_ref().unchecked_ref())?;
+    touchend.forget();
+
+    let state_kd = state.clone();
+    let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            e.prevent_default();
+            state_kd.borrow_mut().keys[idx] = true;
+        }
+    }));
+    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    keydown.forget();
+
+    let state_ku = state.clone();
+    let keyup = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            state_ku.borrow_mut().keys[idx] = false;
+        }
+    }));
+    window.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+    keyup.forget();
+
+    let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let loop_fn_inner = loop_fn.clone();
+    let state_inner   = state.clone();
+    let last_time = Rc::new(RefCell::new(0.0f64));
+    let fps       = Rc::new(RefCell::new(0.0f64));
+
+    *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let mut s = state_inner.borrow_mut();
+        let CombinedAppState {
+            cloth_sim, cloth, rigid_sim, rigid_params, cube_cloth,
+            ctx, light, camera, params, keys, ..
+        } = &mut *s;
+
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw   -= ROT_SPEED; }
+        if keys[1] { camera.yaw   += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd   = camera.forward();
+        let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
+        if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
+
+        // Step cloth
+        cloth_sim.step(&params.borrow());
+        cloth_sim.write_to_cloth(cloth, ctx);
+
+        // Step rigid body and push updated world-space vertices to render mesh
+        rigid_sim.step(rigid_params);
+        let world_verts = rigid_sim.bodies[0].world_vertices();
+        for (i, pos) in cube_cloth.positions.iter_mut().enumerate() {
+            let v = world_verts[i];
+            *pos = [v[0], v[1], v[2]];
+        }
+        cube_cloth.upload(ctx);
+
+        if let Ok((frame, view)) = ctx.begin_frame() {
+            cloth.render(ctx, &view, light, camera);
+            cube_cloth.render_over(ctx, &view, light, camera);
+            frame.present();
+        }
+
+        let now = web_sys::window().unwrap().performance().unwrap().now();
+        let mut last = last_time.borrow_mut();
+        let dt = now - *last;
+        *last = now;
+        if dt > 0.0 { *fps.borrow_mut() = 1000.0 / dt; }
+        fps_div.set_inner_html(&format!("FPS: {:.1}", *fps.borrow()));
+
+        web_sys::window().unwrap()
+            .request_animation_frame(
+                loop_fn_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+            ).unwrap();
+    }) as Box<dyn FnMut()>));
+
+    window.request_animation_frame(
+        loop_fn.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+    )?;
+
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub async fn run_cloth(canvas_id: &str) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     let window = web_sys::window().unwrap();
     let canvas = window
@@ -794,6 +1079,138 @@ pub fn set_wireframe_enabled(enabled: bool) {
             state.borrow_mut().cloth.wireframe_enabled = enabled;
         }
     });
+}
+
+/// Simulate a single rigid cube (0.25 × 0.25 × 0.25) spinning freely.
+///
+/// The cube is centered at the origin with no translational velocity and a
+/// small initial angular velocity.  No inter-body gravity is applied (single
+/// body).  Camera controls (arrow keys / WASD) work as in the other sims.
+#[wasm_bindgen]
+pub async fn run_rigid(canvas_id: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    let window = web_sys::window().unwrap();
+    let canvas = window
+        .document().unwrap()
+        .get_element_by_id(canvas_id).unwrap()
+        .dyn_into::<HtmlCanvasElement>().unwrap();
+
+    let ctx    = GpuContext::new(canvas.clone()).await?;
+    let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
+    let camera = Camera::new(&ctx);
+
+    // ── Cube mesh: 8 vertices, 2 triangles per face, outward-CCW winding ──
+    const H: f32 = 0.125; // half-side → 0.25 × 0.25 × 0.25 cube
+    let verts: &[[f32; 3]] = &[
+        [-H, -H, -H], [ H, -H, -H], [ H,  H, -H], [-H,  H, -H], // 0-3: -Z face
+        [-H, -H,  H], [ H, -H,  H], [ H,  H,  H], [-H,  H,  H], // 4-7: +Z face
+    ];
+    let face_indices: &[[u32; 3]] = &[
+        [4, 5, 6], [4, 6, 7], // +Z
+        [1, 0, 3], [1, 3, 2], // -Z
+        [0, 4, 7], [0, 7, 3], // -X
+        [5, 1, 2], [5, 2, 6], // +X
+        [7, 6, 2], [7, 2, 3], // +Y
+        [0, 1, 5], [0, 5, 4], // -Y
+    ];
+
+    let template = RigidBodyTemplate::new(verts, face_indices);
+    let body = RigidBodyInstance::new(
+        template,
+        na::Vector3::zeros(),                    // c: centered at origin
+        na::Vector3::zeros(),                    // theta: no initial rotation
+        na::Vector3::zeros(),                    // cvel: no translational velocity
+        na::Vector3::new(1.0, 2.0, 0.5),        // w: gentle spin (rad/s)
+        1000.0,                                  // density (kg/m³)
+    );
+    let sim    = RigidSimCore::new(vec![body]);
+    let params = RigidSimParams { gravity_enabled: false, ..Default::default() };
+
+    // Cloth is used purely for rendering — positions are updated each frame
+    // from the body's current world-space vertices.
+    let cloth = Cloth::from_mesh(
+        &ctx,
+        verts.to_vec(),
+        face_indices.to_vec(),
+        vec![[0.72, 0.53, 0.30]; 8], // warm wood colour
+        HashMap::new(),
+        &light,
+    );
+
+    let state = Rc::new(RefCell::new(RigidAppState {
+        ctx, cloth, light, camera, sim, params,
+        canvas: canvas.clone(), keys: [false; 8],
+    }));
+    RIGID_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    let state_kd = state.clone();
+    let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            e.prevent_default();
+            state_kd.borrow_mut().keys[idx] = true;
+        }
+    }));
+    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    keydown.forget();
+
+    let state_ku = state.clone();
+    let keyup = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            state_ku.borrow_mut().keys[idx] = false;
+        }
+    }));
+    window.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+    keyup.forget();
+
+    let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let loop_fn_inner = loop_fn.clone();
+    let state_inner   = state.clone();
+
+    *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let mut s = state_inner.borrow_mut();
+        let RigidAppState { sim, cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw   -= ROT_SPEED; }
+        if keys[1] { camera.yaw   += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd   = camera.forward();
+        let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
+        if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
+
+        sim.step(params);
+
+        // Push updated world-space vertex positions into the render mesh.
+        let world_verts = sim.bodies[0].world_vertices();
+        for (i, pos) in cloth.positions.iter_mut().enumerate() {
+            let v = world_verts[i];
+            *pos = [v[0], v[1], v[2]];
+        }
+        cloth.upload(ctx);
+
+        if let Ok((frame, view)) = ctx.begin_frame() {
+            cloth.render(ctx, &view, light, camera);
+            frame.present();
+        }
+
+        web_sys::window().unwrap()
+            .request_animation_frame(
+                loop_fn_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+            ).unwrap();
+    }) as Box<dyn FnMut()>));
+
+    window.request_animation_frame(
+        loop_fn.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+    )?;
+
+    Ok(())
 }
 
 /// Maps "ArrowLeft/Right/Up/Down" to indices 0/1/2/3.
