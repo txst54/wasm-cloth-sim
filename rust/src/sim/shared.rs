@@ -156,6 +156,22 @@ impl EdgeSpatialHash {
 
     }
 
+    pub fn query_aabb(&self, min: [f32; 3], max: [f32; 3]) -> HashSet<u32> {
+        let (cx0,cy0,cz0) = self.cell_of(min[0], min[1], min[2]);
+        let (cx1,cy1,cz1) = self.cell_of(max[0], max[1], max[2]);
+        let mut result = HashSet::new();
+        for cx in cx0..=cx1 {
+            for cy in cy0..=cy1 {
+                for cz in cz0..=cz1 {
+                    if let Some(edges) = self.cells.get(&(cx,cy,cz)) {
+                        result.extend(edges);
+                    }
+                }
+            }
+        }
+        result
+    }
+
     pub fn candidate_pairs(&self) -> Vec<(usize, usize)> {
         let mut pairs = Vec::<(u32, u32)>::new();
 
@@ -216,6 +232,25 @@ pub(super) fn build_vertex_neighbors(faces: &Faces, num_verts: usize) -> Vec<Has
         }
     }
     nb
+}
+
+pub(super) fn build_vertex_to_faces(faces: &Faces, num_verts: usize) -> Vec<Vec<u32>> {
+    let mut vtf = vec![Vec::new(); num_verts];
+    for fi in 0..faces.nrows() {
+        for k in 0..3 {
+            vtf[faces[(fi, k)] as usize].push(fi as u32);
+        }
+    }
+    vtf
+}
+
+pub(super) fn build_vertex_to_edges(edges: &[[u32; 2]], num_verts: usize) -> Vec<Vec<u32>> {
+    let mut vte = vec![Vec::new(); num_verts];
+    for (ei, &[a, b]) in edges.iter().enumerate() {
+        vte[a as usize].push(ei as u32);
+        vte[b as usize].push(ei as u32);
+    }
+    vte
 }
 
 /// For each interior edge shared by two triangles, collect the 4 vertices
@@ -740,6 +775,8 @@ pub struct ClothSimCore {
     pub mouse_pos:          [f32; 3],
     pub triangle_hash:      TriangleSpatialHash,
     pub edge_hash:          EdgeSpatialHash,
+    pub vertex_to_faces:    Vec<Vec<u32>>,
+    pub vertex_to_edges:    Vec<Vec<u32>>,
 }
 
 impl ClothSimCore {
@@ -783,6 +820,8 @@ impl ClothSimCore {
         let diamond_rest_diag: Vec<f32> = diamonds.iter().map(|&[_,_,c,d]| {
             (q_rest.row(c as usize) - q_rest.row(d as usize)).norm()
         }).collect();
+        let vertex_to_faces = build_vertex_to_faces(&faces, num_verts);
+        let vertex_to_edges = build_vertex_to_edges(&edges, num_verts);
 
         let tri_cell_size = 3.6 / (n as f32 - 1.0);
         let mut triangle_hash = TriangleSpatialHash::new(tri_cell_size);
@@ -804,6 +843,8 @@ impl ClothSimCore {
             clicked_vertex: None, dragging_vertices: None, mouse_pos: [0.0; 3],
             triangle_hash,
             edge_hash,
+            vertex_to_faces,
+            vertex_to_edges,
         }
     }
 
@@ -841,6 +882,8 @@ impl ClothSimCore {
         let diamond_rest_diag: Vec<f32> = diamonds.iter().map(|&[_, _, c, d]| {
             (q_rest.row(c as usize) - q_rest.row(d as usize)).norm()
         }).collect();
+        let vertex_to_faces = build_vertex_to_faces(&faces, num_verts);
+        let vertex_to_edges = build_vertex_to_edges(&edges, num_verts);
 
         let stretch_lambdas = vec![0.0f32; edges.len()];
         let bend_lambdas = vec![0.0f32; diamonds.len()];
@@ -864,6 +907,8 @@ impl ClothSimCore {
             clicked_vertex: None, dragging_vertices: None, mouse_pos: [0.0; 3],
             triangle_hash,
             edge_hash,
+            vertex_to_faces,
+            vertex_to_edges,
         }
     }
 
@@ -981,15 +1026,29 @@ impl ClothSimCore {
     }
 
     /// CCD-based self-collision resolution (vertex-triangle and edge-edge).
+    /// Rebuilds hashes and runs a single full pass. Used by external callers
+    /// (e.g. paper_sim) that manage their own iteration count.
     pub fn solve_self_collision(&mut self, params: &SimParams) {
         if !params.self_collision_enabled { return; }
         let threshold = params.self_collision_threshold as f32;
-
         self.triangle_hash.rebuild(&self.q, &self.q_prev, &self.faces);
         self.edge_hash.rebuild(&self.q, &self.q_prev, &self.edges);
+        self.solve_self_collision_pass(threshold, None);
+    }
 
-        let vt_pairs = self.close_vertex_triangle_pairs(threshold);
-        let ee_pairs = self.close_edge_edge_pairs(threshold);
+    /// One pass of CCD self-collision resolution. When `dirty` is `Some`, only
+    /// candidate pairs involving a dirty feature are generated; the spatial hashes
+    /// must already be built before calling with `dirty = Some(...)`. Returns the
+    /// set of vertices whose positions were modified.
+    fn solve_self_collision_pass(&mut self, threshold: f32, dirty: Option<&HashSet<usize>>) -> HashSet<usize> {
+        let vt_pairs = match dirty {
+            None => self.close_vertex_triangle_pairs(threshold),
+            Some(d) => self.close_vertex_triangle_pairs_dirty(threshold, d),
+        };
+        let ee_pairs = match dirty {
+            None => self.close_edge_edge_pairs(threshold),
+            Some(d) => self.close_edge_edge_pairs_dirty(threshold, d),
+        };
 
         let mut vt_events: Vec<(f32, usize, u32, f32, f32, f32)> = Vec::new();
 
@@ -1055,7 +1114,8 @@ impl ClothSimCore {
         }
 
         all_events.sort_unstable_by(|a, b| a.t().partial_cmp(&b.t()).unwrap());
-        // let q_cpy = self.q.clone();
+
+        let mut moved: HashSet<usize> = HashSet::new();
 
         for event in all_events {
             match event {
@@ -1124,6 +1184,7 @@ impl ClothSimCore {
                         self.q[(vi, 0)] += n_hat[0] * delta;
                         self.q[(vi, 1)] += n_hat[1] * delta;
                         self.q[(vi, 2)] += n_hat[2] * delta;
+                        moved.insert(vi);
                     }
                     for (ti, wi) in [(i0, w0), (i1, w1), (i2, w2)] {
                         if self.w[ti] > 0.0 {
@@ -1131,6 +1192,7 @@ impl ClothSimCore {
                             self.q[(ti, 0)] -= n_hat[0] * delta;
                             self.q[(ti, 1)] -= n_hat[1] * delta;
                             self.q[(ti, 2)] -= n_hat[2] * delta;
+                            moved.insert(ti);
                         }
                     }
                 }
@@ -1213,11 +1275,14 @@ impl ClothSimCore {
                             self.q[(vi, 0)] += n_hat[0] * delta;
                             self.q[(vi, 1)] += n_hat[1] * delta;
                             self.q[(vi, 2)] += n_hat[2] * delta;
+                            moved.insert(vi);
                         }
                     }
                 }
             }
         }
+
+        moved
     }
 
     /// Derive velocity from position change and apply damping.
@@ -1312,8 +1377,16 @@ impl ClothSimCore {
             self.solve_pins(params);
             self.solve_pulling(params);
         }
-        for _ in 0..params.self_collision_recompute_iters {
-            self.solve_self_collision(params);
+        if params.self_collision_enabled {
+            let threshold = params.self_collision_threshold as f32;
+            self.triangle_hash.rebuild(&self.q, &self.q_prev, &self.faces);
+            self.edge_hash.rebuild(&self.q, &self.q_prev, &self.edges);
+            let mut dirty: Option<HashSet<usize>> = None;
+            for _ in 0..params.self_collision_recompute_iters {
+                let moved = self.solve_self_collision_pass(threshold, dirty.as_ref());
+                if moved.is_empty() { break; }
+                dirty = Some(moved);
+            }
         }
         self.update_velocity(params);
     }
@@ -1343,42 +1416,121 @@ impl ClothSimCore {
         pairs
     }
 
-    pub fn close_edge_edge_pairs(&mut self, threshold: f32) -> Vec<(usize, usize)> {
-
+    pub fn close_edge_edge_pairs(&self, threshold: f32) -> Vec<(usize, usize)> {
         let candidates = self.edge_hash.candidate_pairs();
-        let mut out = Vec::new();
-        out.reserve(candidates.len());
-
-        for (ei, ej) in candidates.iter().copied() {
+        let mut out = Vec::with_capacity(candidates.len());
+        for (ei, ej) in candidates {
             let [a0, a1] = self.edges[ei];
             let [b0, b1] = self.edges[ej];
-
-            let a0 = a0 as usize;
-            let a1 = a1 as usize;
-            let b0 = b0 as usize;
-            let b1 = b1 as usize;
-
-            if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 {
-                continue;
-            }
-
+            if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 { continue; }
             out.push((ei, ej));
         }
+        out
+    }
 
-        let total_insertions: usize = self.edge_hash.cells.values().map(|v| v.len()).sum();
-        let num_cells = self.edge_hash.cells.len();
-        let max_bucket = self.edge_hash.cells.values().map(|v| v.len()).max().unwrap_or(0);
-        let avg_bucket = if num_cells > 0 {
-            total_insertions as f64 / num_cells as f64
-        } else {
-            0.0
-        };
-        let avg_cells_per_edge = if !self.edges.is_empty() {
-            total_insertions as f64 / self.edges.len() as f64
-        } else {
-            0.0
-        };
+    /// Filtered VT candidates: only pairs where vi is dirty or fi contains a dirty vertex.
+    fn close_vertex_triangle_pairs_dirty(&self, threshold: f32, dirty: &HashSet<usize>) -> Vec<(usize, u32)> {
+        let mut pairs = Vec::new();
 
+        // Pass 1: dirty vertices query all triangles via hash.
+        for &vi in dirty {
+            let px0=self.q_prev[(vi,0)]; let py0=self.q_prev[(vi,1)]; let pz0=self.q_prev[(vi,2)];
+            let px1=self.q[(vi,0)];     let py1=self.q[(vi,1)];     let pz1=self.q[(vi,2)];
+            let min = [px0.min(px1)-threshold, py0.min(py1)-threshold, pz0.min(pz1)-threshold];
+            let max = [px0.max(px1)+threshold, py0.max(py1)+threshold, pz0.max(pz1)+threshold];
+            for fi in self.triangle_hash.query_aabb(min, max) {
+                let i0=self.faces[(fi as usize,0)] as usize;
+                let i1=self.faces[(fi as usize,1)] as usize;
+                let i2=self.faces[(fi as usize,2)] as usize;
+                if vi==i0 || vi==i1 || vi==i2 { continue; }
+                let nb = &self.vertex_neighbors[vi];
+                if nb.contains(&(i0 as u32)) || nb.contains(&(i1 as u32)) || nb.contains(&(i2 as u32)) { continue; }
+                pairs.push((vi, fi));
+            }
+        }
+
+        // Pass 2: non-dirty vertices against dirty faces (face moved into a static vertex).
+        let dirty_face_aabbs: Vec<(u32, [f32; 3], [f32; 3])> = dirty.iter()
+            .flat_map(|&vi| self.vertex_to_faces[vi].iter().copied())
+            .collect::<HashSet<u32>>()
+            .into_iter()
+            .map(|fi| {
+                let v0=self.faces[(fi as usize,0)] as usize;
+                let v1=self.faces[(fi as usize,1)] as usize;
+                let v2=self.faces[(fi as usize,2)] as usize;
+                let mut fmin = [f32::MAX; 3];
+                let mut fmax = [f32::MIN; 3];
+                for &v in &[v0, v1, v2] {
+                    for k in 0..3 {
+                        fmin[k] = fmin[k].min(self.q[(v,k)]).min(self.q_prev[(v,k)]);
+                        fmax[k] = fmax[k].max(self.q[(v,k)]).max(self.q_prev[(v,k)]);
+                    }
+                }
+                (fi, fmin, fmax)
+            })
+            .collect();
+
+        if !dirty_face_aabbs.is_empty() {
+            for vi in 0..self.q.nrows() {
+                if dirty.contains(&vi) { continue; }
+                let vx=self.q[(vi,0)]; let vy=self.q[(vi,1)]; let vz=self.q[(vi,2)];
+                for &(fi, fmin, fmax) in &dirty_face_aabbs {
+                    if vx < fmin[0]-threshold || vx > fmax[0]+threshold { continue; }
+                    if vy < fmin[1]-threshold || vy > fmax[1]+threshold { continue; }
+                    if vz < fmin[2]-threshold || vz > fmax[2]+threshold { continue; }
+                    let i0=self.faces[(fi as usize,0)] as usize;
+                    let i1=self.faces[(fi as usize,1)] as usize;
+                    let i2=self.faces[(fi as usize,2)] as usize;
+                    if vi==i0 || vi==i1 || vi==i2 { continue; }
+                    let nb = &self.vertex_neighbors[vi];
+                    if nb.contains(&(i0 as u32)) || nb.contains(&(i1 as u32)) || nb.contains(&(i2 as u32)) { continue; }
+                    pairs.push((vi, fi));
+                }
+            }
+        }
+
+        pairs
+    }
+
+    /// Filtered EE candidates: only pairs where at least one edge contains a dirty vertex.
+    /// Queries the edge hash per dirty edge to find spatial neighbours.
+    fn close_edge_edge_pairs_dirty(&self, threshold: f32, dirty: &HashSet<usize>) -> Vec<(usize, usize)> {
+        let dirty_edges: HashSet<u32> = dirty.iter()
+            .flat_map(|&vi| self.vertex_to_edges[vi].iter().copied())
+            .collect();
+
+        let mut raw = Vec::<(u32, u32)>::new();
+
+        for &ei in &dirty_edges {
+            let [v0, v1] = self.edges[ei as usize];
+            let v0 = v0 as usize; let v1 = v1 as usize;
+            let min_x = self.q[(v0,0)].min(self.q[(v1,0)]).min(self.q_prev[(v0,0)]).min(self.q_prev[(v1,0)]);
+            let min_y = self.q[(v0,1)].min(self.q[(v1,1)]).min(self.q_prev[(v0,1)]).min(self.q_prev[(v1,1)]);
+            let min_z = self.q[(v0,2)].min(self.q[(v1,2)]).min(self.q_prev[(v0,2)]).min(self.q_prev[(v1,2)]);
+            let max_x = self.q[(v0,0)].max(self.q[(v1,0)]).max(self.q_prev[(v0,0)]).max(self.q_prev[(v1,0)]);
+            let max_y = self.q[(v0,1)].max(self.q[(v1,1)]).max(self.q_prev[(v0,1)]).max(self.q_prev[(v1,1)]);
+            let max_z = self.q[(v0,2)].max(self.q[(v1,2)]).max(self.q_prev[(v0,2)]).max(self.q_prev[(v1,2)]);
+            let nearby = self.edge_hash.query_aabb(
+                [min_x - threshold, min_y - threshold, min_z - threshold],
+                [max_x + threshold, max_y + threshold, max_z + threshold],
+            );
+            for ej in nearby {
+                if ej == ei { continue; }
+                let (a, b) = if ei < ej { (ei, ej) } else { (ej, ei) };
+                raw.push((a, b));
+            }
+        }
+
+        raw.sort_unstable();
+        raw.dedup();
+
+        let mut out = Vec::new();
+        for (a, b) in raw {
+            let [a0, a1] = self.edges[a as usize];
+            let [b0, b1] = self.edges[b as usize];
+            if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 { continue; }
+            out.push((a as usize, b as usize));
+        }
         out
     }
 
