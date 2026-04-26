@@ -718,10 +718,10 @@ pub struct DragInfluence {
     pub offset: na::Vector3<f32>,
 }
 
-// ── SimCore ───────────────────────────────────────────────────────────────────
+// ── ClothSimCore ──────────────────────────────────────────────────────────────
 
 /// Shared XPBD state for all fabric-type simulations.
-pub struct SimCore {
+pub struct ClothSimCore {
     pub q:                  Positions,
     pub q_rest:             Positions,
     pub q_prev:             Positions,
@@ -742,7 +742,7 @@ pub struct SimCore {
     pub edge_hash:          EdgeSpatialHash,
 }
 
-impl SimCore {
+impl ClothSimCore {
     pub fn from_cloth(cloth: &Cloth, pinned: &[usize]) -> Self {
         let n = cloth.resolution as usize;
         let num_verts = n * n;
@@ -1415,4 +1415,12 @@ impl SimCore {
         }
         cloth.upload(ctx);
     }
+}
+
+// ── SimCore ───────────────────────────────────────────────────────────────────
+
+/// Top-level simulation state containing cloth and rigid body sub-simulations.
+pub struct SimCore {
+    pub cloth: ClothSimCore,
+    pub rigid: super::rigid_sim::RigidSimCore,
 }

@@ -19,6 +19,8 @@ import init, {
   set_use_distance_constraints,
   set_resolution,
   set_pulling_area,
+    run_rigid,
+    run_cloth,
 } from '../rust/pkg/my_webgpu_app.js'
 import {SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions} from './components.js'
 

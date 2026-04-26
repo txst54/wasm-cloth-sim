@@ -514,6 +514,23 @@ impl Cloth {
     }
 
     pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
+        self.render_impl(ctx, view, light, camera, true);
+    }
+
+    /// Render without clearing the color or depth buffer first, so this mesh
+    /// composites on top of whatever was already drawn into `view`.
+    pub fn render_over(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
+        self.render_impl(ctx, view, light, camera, false);
+    }
+
+    fn render_impl(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera, clear: bool) {
+        let color_load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 })
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let depth_load = if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load };
+
         let mut encoder = ctx.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Cloth Encoder") },
         );
@@ -524,17 +541,11 @@ impl Cloth {
                     view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &ctx.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -548,7 +559,6 @@ impl Cloth {
             rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..self.index_count, 0, 0..1);
 
-            // Draw wireframe overlay if enabled
             if self.wireframe_enabled {
                 rpass.set_pipeline(&self.wireframe_pipeline);
                 rpass.set_bind_group(0, &light.bind_group, &[]);
