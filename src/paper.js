@@ -157,7 +157,7 @@ function buildPanel() {
 init().then(async () => {
   // Paper sim defaults
   set_gravity_enabled(false)
-  set_self_collision_enabled(true)
+  set_self_collision_enabled(false)
   // set_use_distance_constraints(true)
   set_bending_enabled(true)
   set_stretch_weight(1.0)
@@ -168,7 +168,7 @@ init().then(async () => {
 
   try {
     // Fetch the crease pattern file
-    const file = 'assets/waterbomb.cp'
+    const file = 'assets/yaccho.cp'
     const cpResponse = await fetch(file)
     if (cpResponse.ok) {
       const cpData = await cpResponse.text()

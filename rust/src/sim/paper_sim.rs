@@ -7,7 +7,7 @@ use web_sys::console;
 use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
 use super::shared::{Positions, SimCore};
 use super::traits::MeshSim;
-use super::crease::{CreasePattern, CreaseType};
+use super::crease::{CreasePattern, CreaseType, find_edges_on_creases, find_overlapping_edges};
 
 // ── Fold specification ────────────────────────────────────────────────────────
 
@@ -113,22 +113,8 @@ impl PaperSim {
     /// Create PaperSim from a crease pattern overlaid on a 64x64 grid.
     /// Returns (PaperSim, positions, faces, colors) for building Cloth.
     pub fn from_crease_pattern(cp: &CreasePattern) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
-        const GRID_RES: usize = 16;
-        let (positions, faces, fold_edges, crease_chains) = cp.build_mesh(GRID_RES);
-
-        // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
-        let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
-
-        // Color vertices that are part of fold edges
-        for (&(a, b), &crease_type) in &fold_edges {
-            let color = match crease_type {
-                CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
-                CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
-                CreaseType::Boundary => [0.85, 0.85, 0.85],
-            };
-            vertex_colors[a as usize] = color;
-            vertex_colors[b as usize] = color;
-        }
+        const GRID_RES: usize = 1;
+        let (positions, faces, fold_edges, crease_chains, split_creases) = cp.build_mesh(GRID_RES);
 
         // Find top-right corner vertex to pin (closest to (0.9, 0.9))
         let mut pin_idx = 0usize;
@@ -143,6 +129,58 @@ impl PaperSim {
 
         // Build SimCore from mesh with top corner pinned
         let core = SimCore::from_mesh(&positions, &faces, &[]);
+
+        // Check for duplicate/overlapping edges in the mesh
+        let overlapping = find_overlapping_edges(&positions, &core.edges, 1e-6);
+        if !overlapping.is_empty() {
+            console::warn_1(&format!(
+                "WARNING: Found {} overlapping edge pairs in mesh!",
+                overlapping.len()
+            ).into());
+            for (e1, e2) in &overlapping {
+                console::warn_1(&format!(
+                    "  Overlap: edge [{}, {}] and edge [{}, {}]",
+                    e1[0], e1[1], e2[0], e2[1]
+                ).into());
+            }
+        } else {
+            console::log_1(&"No overlapping edges found in mesh".into());
+        }
+
+        // Check ALL mesh edges against crease lines to find edges that lie on creases
+        // This catches edges that the triangulation created that happen to align with creases
+        let tolerance = 1e-6; // tolerance for "on crease" check
+        let edges_on_creases = find_edges_on_creases(&positions, &core.edges, &split_creases, tolerance);
+
+        // Merge fold_edges (from CDT constraints) with edges_on_creases (geometric check)
+        let mut all_fold_edges: HashMap<(u32, u32), CreaseType> = fold_edges.clone();
+        let mut extra_edges = 0usize;
+        for (edge, crease_type) in &edges_on_creases {
+            if !all_fold_edges.contains_key(edge) {
+                all_fold_edges.insert(*edge, *crease_type);
+                extra_edges += 1;
+            }
+        }
+        if extra_edges > 0 {
+            console::log_1(&format!(
+                "Found {} additional edges lying on crease lines",
+                extra_edges
+            ).into());
+        }
+
+        // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
+        let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
+
+        // Color vertices that are part of fold edges
+        for (&(a, b), &crease_type) in &all_fold_edges {
+            let color = match crease_type {
+                CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
+                CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
+                CreaseType::Boundary => [0.85, 0.85, 0.85],
+            };
+            vertex_colors[a as usize] = color;
+            vertex_colors[b as usize] = color;
+        }
 
         // Build crease-bend triples from chains: for each consecutive (A,B,C),
         // B is the interior vertex that should stay on line AC.
@@ -163,10 +201,10 @@ impl PaperSim {
             crease_bends,
         };
 
-        // Build fold map from crease pattern edges
+        // Build fold map from all fold edges (CDT constraints + geometric matches)
         let mut fold_map: HashMap<(u32, u32), FoldSpec> = HashMap::new();
-        let edge_colors = fold_edges.clone();
-        for ((a, b), crease_type) in fold_edges {
+        let edge_colors = all_fold_edges.clone();
+        for ((a, b), crease_type) in all_fold_edges {
             let direction = match crease_type {
                 CreaseType::Mountain => FoldDirection::Mountain,
                 CreaseType::Valley => FoldDirection::Valley,
