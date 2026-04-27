@@ -1363,18 +1363,25 @@ impl ClothSimCore {
     ) {
         self.predict(params);
         self.reset_lambdas();
+        let ratio = params.self_collision_recompute_iters as f32 / params.constraint_iters as f32;
+        let mut accumulated = 0.0f32;
+        let mut collisions_run = 0u32;
+
         for _ in 0..params.constraint_iters {
             self.solve_stretch(params);
             self.solve_bend(params, skip_bending);
             self.solve_pins(params);
             self.solve_pulling(params);
+            if let Some((bvh, prev_verts, curr_verts, faces, threshold)) = rigid {
+                self.solve_rigid_body_collision(bvh, prev_verts, curr_verts, faces, threshold);
+            }
+            accumulated += ratio;
+            while accumulated > (collisions_run + 1) as f32 {
+                self.solve_self_collision(params);
+                collisions_run += 1;
+            }
         }
-        for _ in 0..params.self_collision_recompute_iters {
-            self.solve_self_collision(params);
-        }
-        if let Some((bvh, prev_verts, curr_verts, faces, threshold)) = rigid {
-            self.solve_rigid_body_collision(bvh, prev_verts, curr_verts, faces, threshold);
-        }
+        self.solve_self_collision(params);
         self.update_velocity(params);
     }
 
