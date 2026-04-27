@@ -3,7 +3,7 @@ use web_sys::console;
 
 use nalgebra as na;
 
-use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
+use crate::{bvh::Bvh, cloth::Cloth, gpu::GpuContext, params::SimParams};
 
 /// Nx3 matrix of vertex positions / velocities.
 pub type Positions = na::OMatrix<f32, na::Dyn, na::Const<3>>;
@@ -331,6 +331,7 @@ fn find_earliest_root(
     t1: f32,
     tol: f32,
     thickness: f32,
+    edge_len: f32,
 ) -> Option<f32> {
 
     let tm = (t0 + t1) * 0.5;
@@ -376,7 +377,6 @@ fn find_earliest_root(
     boundaries.extend_from_slice(&critical);
     boundaries.push(t1);
 
-    let edge_len = 1.0 / 31.0; //todo change to actual tri edge length or edge length
     let volume_eps = thickness * edge_len * edge_len;
     let f0 = f(t0);
     let f1 = f(t1);
@@ -484,7 +484,8 @@ pub fn ccd_vertex_triangle(
         (f(t_hi) - f(t_lo)) / (t_hi - t_lo)
     };
 
-    let t_coplanar = find_earliest_root(f, df, 0.0, 1.0, 1e-6, thickness)?;
+    let edge_len = 1.0 / 31.0; // (b0 - a0).norm().max(1.0 / 16.0);
+    let t_coplanar = find_earliest_root(f, df, 0.0, 1.0, 1e-6, thickness, edge_len)?;
 
     // At t_coplanar, check if p is actually inside the triangle.
     let p = p0 + t_coplanar * (p1 - p0);
@@ -530,7 +531,8 @@ pub fn ccd_edge_edge(
         (f(t_hi) - f(t_lo)) / (t_hi - t_lo)
     };
 
-    let t_coplanar = find_earliest_root(f, df, 0.0, 1.0, 1e-6, thickness)?;
+    let edge_len = (q0 - p0).norm().max((b0 - a0).norm()).max(1e-6);
+    let t_coplanar = find_earliest_root(f, df, 0.0, 1.0, 1e-6, thickness, edge_len)?;
 
     // At t*, reconstruct positions and check that the crossing point
     // actually lies within both edge extents [0,1].
@@ -1025,30 +1027,15 @@ impl ClothSimCore {
         }
     }
 
-    /// CCD-based self-collision resolution (vertex-triangle and edge-edge).
-    /// Rebuilds hashes and runs a single full pass. Used by external callers
-    /// (e.g. paper_sim) that manage their own iteration count.
     pub fn solve_self_collision(&mut self, params: &SimParams) {
         if !params.self_collision_enabled { return; }
         let threshold = params.self_collision_threshold as f32;
+
         self.triangle_hash.rebuild(&self.q, &self.q_prev, &self.faces);
         self.edge_hash.rebuild(&self.q, &self.q_prev, &self.edges);
-        self.solve_self_collision_pass(threshold, None);
-    }
 
-    /// One pass of CCD self-collision resolution. When `dirty` is `Some`, only
-    /// candidate pairs involving a dirty feature are generated; the spatial hashes
-    /// must already be built before calling with `dirty = Some(...)`. Returns the
-    /// set of vertices whose positions were modified.
-    fn solve_self_collision_pass(&mut self, threshold: f32, dirty: Option<&HashSet<usize>>) -> HashSet<usize> {
-        let vt_pairs = match dirty {
-            None => self.close_vertex_triangle_pairs(threshold),
-            Some(d) => self.close_vertex_triangle_pairs_dirty(threshold, d),
-        };
-        let ee_pairs = match dirty {
-            None => self.close_edge_edge_pairs(threshold),
-            Some(d) => self.close_edge_edge_pairs_dirty(threshold, d),
-        };
+        let vt_pairs = self.close_vertex_triangle_pairs(threshold);
+        let ee_pairs = self.close_edge_edge_pairs(threshold);
 
         let mut vt_events: Vec<(f32, usize, u32, f32, f32, f32)> = Vec::new();
 
@@ -1114,8 +1101,7 @@ impl ClothSimCore {
         }
 
         all_events.sort_unstable_by(|a, b| a.t().partial_cmp(&b.t()).unwrap());
-
-        let mut moved: HashSet<usize> = HashSet::new();
+        // let q_cpy = self.q.clone();
 
         for event in all_events {
             match event {
@@ -1184,7 +1170,6 @@ impl ClothSimCore {
                         self.q[(vi, 0)] += n_hat[0] * delta;
                         self.q[(vi, 1)] += n_hat[1] * delta;
                         self.q[(vi, 2)] += n_hat[2] * delta;
-                        moved.insert(vi);
                     }
                     for (ti, wi) in [(i0, w0), (i1, w1), (i2, w2)] {
                         if self.w[ti] > 0.0 {
@@ -1192,7 +1177,6 @@ impl ClothSimCore {
                             self.q[(ti, 0)] -= n_hat[0] * delta;
                             self.q[(ti, 1)] -= n_hat[1] * delta;
                             self.q[(ti, 2)] -= n_hat[2] * delta;
-                            moved.insert(ti);
                         }
                     }
                 }
@@ -1275,14 +1259,11 @@ impl ClothSimCore {
                             self.q[(vi, 0)] += n_hat[0] * delta;
                             self.q[(vi, 1)] += n_hat[1] * delta;
                             self.q[(vi, 2)] += n_hat[2] * delta;
-                            moved.insert(vi);
                         }
                     }
                 }
             }
         }
-
-        moved
     }
 
     /// Derive velocity from position change and apply damping.
@@ -1366,9 +1347,20 @@ impl ClothSimCore {
         }
     }
 
-    /// Convenience: full XPBD step for simple sims (cloth) that don't need
-    /// custom constraints injected into the loop.
+    /// Full XPBD step. Delegates to `step_with_rigid` with no rigid body collision.
     pub fn step(&mut self, params: &SimParams, skip_bending: &HashSet<usize>) {
+        self.step_with_rigid(params, skip_bending, None);
+    }
+
+    /// Full XPBD step with optional rigid body collision resolved before the
+    /// velocity update. Pass prev and curr rigid world verts (from before/after
+    /// the rigid step) so cloth-rigid CCD can find the earliest crossing time.
+    pub fn step_with_rigid<'a>(
+        &mut self,
+        params: &SimParams,
+        skip_bending: &HashSet<usize>,
+        rigid: Option<(&'a Bvh, &'a [na::Vector3<f32>], &'a [na::Vector3<f32>], &'a [[u32; 3]], f32)>,
+    ) {
         self.predict(params);
         self.reset_lambdas();
         for _ in 0..params.constraint_iters {
@@ -1377,18 +1369,139 @@ impl ClothSimCore {
             self.solve_pins(params);
             self.solve_pulling(params);
         }
-        if params.self_collision_enabled {
-            let threshold = params.self_collision_threshold as f32;
-            self.triangle_hash.rebuild(&self.q, &self.q_prev, &self.faces);
-            self.edge_hash.rebuild(&self.q, &self.q_prev, &self.edges);
-            let mut dirty: Option<HashSet<usize>> = None;
-            for _ in 0..params.self_collision_recompute_iters {
-                let moved = self.solve_self_collision_pass(threshold, dirty.as_ref());
-                if moved.is_empty() { break; }
-                dirty = Some(moved);
-            }
+        for _ in 0..params.self_collision_recompute_iters {
+            self.solve_self_collision(params);
+        }
+        if let Some((bvh, prev_verts, curr_verts, faces, threshold)) = rigid {
+            self.solve_rigid_body_collision(bvh, prev_verts, curr_verts, faces, threshold);
         }
         self.update_velocity(params);
+    }
+
+    /// Resolve cloth-rigid body collisions using CCD vertex-triangle tests.
+    ///
+    /// For each cloth vertex, all candidate rigid faces are tested with
+    /// `ccd_vertex_triangle` over the interval [q_prev→q] × [prev→curr rigid].
+    /// The face with the **earliest** collision time wins for that vertex, and
+    /// the cloth vertex is pushed out along the rigid face normal at that time.
+    /// Pinned vertices (w == 0) are skipped.
+    pub fn solve_rigid_body_collision(
+        &mut self,
+        rigid_bvh: &Bvh,
+        rigid_prev_verts: &[na::Vector3<f32>],
+        rigid_curr_verts: &[na::Vector3<f32>],
+        rigid_faces: &[[u32; 3]],
+        threshold: f32,
+    ) {
+        let pairs = rigid_bvh.cloth_rigid_pairs(&self.q, &self.q_prev, threshold);
+        let nv = self.q.nrows();
+
+        // Per cloth vertex: earliest (t_star, face_index) + all BVH-candidate faces.
+        let mut earliest: Vec<Option<(f32, u32)>> = vec![None; nv];
+        let mut vertex_candidates: Vec<Vec<u32>> = vec![Vec::new(); nv];
+
+        for &(vi, fi) in &pairs {
+            vertex_candidates[vi].push(fi);
+            if self.w[vi] == 0.0 { continue; }
+
+            let [i0, i1, i2] = rigid_faces[fi as usize];
+            let p0 = na::Vector3::new(self.q_prev[(vi,0)], self.q_prev[(vi,1)], self.q_prev[(vi,2)]);
+            let p1 = na::Vector3::new(self.q[(vi,0)],      self.q[(vi,1)],      self.q[(vi,2)]);
+            let a0 = rigid_prev_verts[i0 as usize]; let a1 = rigid_curr_verts[i0 as usize];
+            let b0 = rigid_prev_verts[i1 as usize]; let b1 = rigid_curr_verts[i1 as usize];
+            let c0 = rigid_prev_verts[i2 as usize]; let c1 = rigid_curr_verts[i2 as usize];
+
+            if let Some((t, _, _, _)) = ccd_vertex_triangle(p0, p1, a0, a1, b0, b1, c0, c1, threshold) {
+                match earliest[vi] {
+                    None => earliest[vi] = Some((t, fi)),
+                    Some((t_prev, _)) if t < t_prev => earliest[vi] = Some((t, fi)),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut ccd_resolved = vec![false; nv];
+
+        for (vi, entry) in earliest.into_iter().enumerate() {
+            let Some((t_star, fi)) = entry else { continue; };
+
+            let [i0, i1, i2] = rigid_faces[fi as usize];
+            let p0 = na::Vector3::new(self.q_prev[(vi,0)], self.q_prev[(vi,1)], self.q_prev[(vi,2)]);
+            let p1 = na::Vector3::new(self.q[(vi,0)],      self.q[(vi,1)],      self.q[(vi,2)]);
+            let a0 = rigid_prev_verts[i0 as usize]; let a1 = rigid_curr_verts[i0 as usize];
+            let b0 = rigid_prev_verts[i1 as usize]; let b1 = rigid_curr_verts[i1 as usize];
+            let c0 = rigid_prev_verts[i2 as usize]; let c1 = rigid_curr_verts[i2 as usize];
+
+            let lerp = |a: na::Vector3<f32>, b: na::Vector3<f32>| a + t_star * (b - a);
+            let p_t = lerp(p0, p1);
+            let a_t = lerp(a0, a1);
+            let b_t = lerp(b0, b1);
+            let c_t = lerp(c0, c1);
+
+            let n_raw = (b1 - a1).cross(&(c1 - a1));
+            let n_len = n_raw.norm();
+            if n_len < 1e-12 { continue; }
+            let mut n_hat = n_raw / n_len;
+
+            // Remaining trajectory after contact: slide along the final surface
+            let remaining = p1 - p_t;                           // where it was trying to go
+            let normal_component = n_hat.dot(&remaining).min(0.0); // inward part only
+            let slide = remaining - n_hat * normal_component;    // strip inward, keep tangential
+
+            // Final position: contact point lifted to threshold, plus slide
+            let p_contact = p_t + n_hat * threshold;
+            let p_final = p_contact + slide;
+
+            self.q[(vi, 0)] = p_final.x;
+            self.q[(vi, 1)] = p_final.y;
+            self.q[(vi, 2)] = p_final.z;
+            ccd_resolved[vi] = true;
+        }
+
+        // Static fallback: vertices CCD missed but are inside the mesh.
+        // Find the closest rigid face and project out if signed distance is negative.
+        for vi in 0..nv {
+            if self.w[vi] == 0.0 { continue; }
+            if ccd_resolved[vi] { continue; }
+            if vertex_candidates[vi].is_empty() { continue; }
+
+            let p = na::Vector3::new(self.q[(vi,0)], self.q[(vi,1)], self.q[(vi,2)]);
+
+            let mut best_abs_dist = f32::MAX;
+            let mut best_signed_dist = f32::MAX;
+            let mut best_normal = na::Vector3::zeros();
+            let mut best_closest = p;
+
+            for &fi in &vertex_candidates[vi] {
+                let [i0, i1, i2] = rigid_faces[fi as usize];
+                let a = rigid_curr_verts[i0 as usize];
+                let b = rigid_curr_verts[i1 as usize];
+                let c = rigid_curr_verts[i2 as usize];
+
+                let n_raw = (b - a).cross(&(c - a));
+                let n_len = n_raw.norm();
+                if n_len < 1e-12 { continue; }
+                let n_hat = n_raw / n_len;
+
+                let closest = closest_point_on_triangle(p, a, b, c);
+                let abs_dist = (p - closest).norm();
+                let signed_dist = n_hat.dot(&(p - a));
+
+                if abs_dist < best_abs_dist {
+                    best_abs_dist = abs_dist;
+                    best_signed_dist = signed_dist;
+                    best_normal = n_hat;
+                    best_closest = closest;
+                }
+            }
+
+            if best_signed_dist < 0.0 {
+                let p_new = best_closest + best_normal * threshold;
+                self.q[(vi, 0)] = p_new.x;
+                self.q[(vi, 1)] = p_new.y;
+                self.q[(vi, 2)] = p_new.z;
+            }
+        }
     }
 
     /// Broad-phase filter: returns `(vertex_idx, face_idx)` pairs where the vertex

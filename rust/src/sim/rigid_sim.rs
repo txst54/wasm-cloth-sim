@@ -38,6 +38,10 @@ impl RigidSimCore {
     }
 
     pub fn step(&mut self, params: &RigidSimParams) {
+        for body in &mut self.bodies {
+            body.prev_c     = body.c;
+            body.prev_theta = body.theta;
+        }
         self.time += params.time_step;
         self.integrate_translational(params);
         self.integrate_rotational(params);

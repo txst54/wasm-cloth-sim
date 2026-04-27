@@ -171,7 +171,7 @@ function buildPanel() {
 
 init().then(async () => {
   try {
-    await run_cloth('canvas')
+    await run('canvas')
   } catch (e) {
     console.error('WASM run() failed:', e)
   }
