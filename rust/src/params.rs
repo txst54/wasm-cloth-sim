@@ -1,3 +1,6 @@
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "native", serde(default))]
 pub struct SimParams {
     pub time_step:         f64,
     pub constraint_iters:  u32,

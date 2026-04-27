@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
-use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
+use crate::params::SimParams;
 use super::shared::{Positions, ClothSimCore};
 use super::traits::MeshSim;
 
@@ -23,25 +23,21 @@ impl DerefMut for ClothSim {
 }
 
 impl ClothSim {
-    pub fn from_cloth(cloth: &Cloth) -> Self {
-        let n = cloth.resolution as usize;
+    /// Create a ClothSim from an NxN grid.
+    pub fn from_grid(resolution: usize) -> Self {
+        let n = resolution;
         let pinned = vec![(n-1)*n, (n-1)*n + (n-1)]; // upper-left, upper-right
-        Self { core: ClothSimCore::from_cloth(cloth, &pinned) }
+        Self { core: ClothSimCore::from_grid(n, &pinned) }
     }
 
     pub fn step(&mut self, params: &SimParams) {
         self.core.step(params, &HashSet::new());
     }
-
-    pub fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) {
-        self.core.write_to_cloth(cloth, ctx);
-    }
 }
 
 impl MeshSim for ClothSim {
-    fn step(&mut self, params: &SimParams)                        { self.core.step(params, &HashSet::new()); }
-    fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) { self.core.write_to_cloth(cloth, ctx); }
-    fn positions(&self) -> &Positions                             { &self.core.q }
-    fn set_clicked_vertex(&mut self, vi: Option<usize>)           { self.core.clicked_vertex = vi; }
-    fn set_mouse_pos(&mut self, pos: [f32; 3])                    { self.core.mouse_pos = pos; }
+    fn step(&mut self, params: &SimParams)              { self.core.step(params, &HashSet::new()); }
+    fn positions(&self) -> &Positions                   { &self.core.q }
+    fn set_clicked_vertex(&mut self, vi: Option<usize>) { self.core.clicked_vertex = vi; }
+    fn set_mouse_pos(&mut self, pos: [f32; 3])          { self.core.mouse_pos = pos; }
 }

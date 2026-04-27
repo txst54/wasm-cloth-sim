@@ -2,11 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 
 use nalgebra as na;
-use web_sys::console;
 
-use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
+use crate::params::SimParams;
+use crate::{platform_log, platform_warn};
 use super::shared::{Positions, ClothSimCore};
-use super::traits::MeshSim;
 use super::crease::{CreasePattern, CreaseType, find_edges_on_creases, find_overlapping_edges};
 
 // ── Fold specification ────────────────────────────────────────────────────────
@@ -96,12 +95,11 @@ impl DerefMut for PaperSim {
 }
 
 impl PaperSim {
-    pub fn from_cloth(cloth: &Cloth) -> Self {
+    /// Create a PaperSim from an NxN grid (used for simple paper demos).
+    pub fn from_grid(resolution: usize) -> Self {
+        let n = resolution;
         Self {
-            core: {
-                let n = cloth.resolution as usize;
-                ClothSimCore::from_cloth(cloth, &[(n-1)*n + (n-1)]) // upper-right only
-            },
+            core: ClothSimCore::from_grid(n, &[(n-1)*n + (n-1)]),
             hinges: Vec::new(),
             fold_speed: 5.0,
             crease_chains: Vec::new(),
@@ -133,18 +131,18 @@ impl PaperSim {
         // Check for duplicate/overlapping edges in the mesh
         let overlapping = find_overlapping_edges(&positions, &core.edges, 1e-6);
         if !overlapping.is_empty() {
-            console::warn_1(&format!(
+            platform_warn!(
                 "WARNING: Found {} overlapping edge pairs in mesh!",
                 overlapping.len()
-            ).into());
+            );
             for (e1, e2) in &overlapping {
-                console::warn_1(&format!(
+                platform_warn!(
                     "  Overlap: edge [{}, {}] and edge [{}, {}]",
                     e1[0], e1[1], e2[0], e2[1]
-                ).into());
+                );
             }
         } else {
-            console::log_1(&"No overlapping edges found in mesh".into());
+            platform_log!("No overlapping edges found in mesh");
         }
 
         // Check ALL mesh edges against crease lines to find edges that lie on creases
@@ -162,10 +160,10 @@ impl PaperSim {
             }
         }
         if extra_edges > 0 {
-            console::log_1(&format!(
+            platform_log!(
                 "Found {} additional edges lying on crease lines",
                 extra_edges
-            ).into());
+            );
         }
 
         // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
@@ -256,20 +254,20 @@ impl PaperSim {
             }
         }
         if dropped_edges > 0 {
-            console::warn_1(&format!(
+            platform_warn!(
                 "PaperSim: {} fold edge(s) have no corresponding diamond (boundary edges or triangulation mismatch)",
                 dropped_edges
-            ).into());
+            );
         }
 
         let mountain_count = self.hinges.iter().filter(|h| h.direction == FoldDirection::Mountain).count();
         let valley_count = self.hinges.iter().filter(|h| h.direction == FoldDirection::Valley).count();
-        console::log_1(&format!(
+        platform_log!(
             "Hinges: {} total, rest ≈ {:.3}, {} mountain, {} valley",
             self.hinges.len(),
             self.hinges.first().map_or(0.0, |h| h.rest_angle),
             mountain_count, valley_count
-        ).into());
+        );
     }
 
     /// Set the fold angle for all hinges.
@@ -347,17 +345,6 @@ impl PaperSim {
         self.core.update_velocity(params);
     }
 
-    pub fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) {
-        self.core.write_to_cloth(cloth, ctx);
-    }
-}
-
-impl MeshSim for PaperSim {
-    fn step(&mut self, params: &SimParams)                        { self.step(params); }
-    fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) { self.core.write_to_cloth(cloth, ctx); }
-    fn positions(&self) -> &Positions                             { &self.core.q }
-    fn set_clicked_vertex(&mut self, vi: Option<usize>)           { self.core.clicked_vertex = vi; }
-    fn set_mouse_pos(&mut self, pos: [f32; 3])                    { self.core.mouse_pos = pos; }
 }
 
 // ── XPBD dihedral-angle constraint ───────────────────────────────────────────
@@ -445,10 +432,10 @@ fn apply_hinge_xpbd(
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if count % 3000 == 0 {
-        console::log_1(&format!(
+        platform_log!(
             "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
             theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
-        ).into());
+        );
     }
 
     add_scaled(q, a, wa * dl * g_a);

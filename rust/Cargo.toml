@@ -4,9 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "native"
+path = "src/bin/native.rs"
+required-features = ["native"]
+
+[features]
+default = []
+native = ["serde", "serde_json"]
 
 [dependencies]
+nalgebra = "0.33"
+spade = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# WASM-only dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -30,5 +46,3 @@ web-sys = { version = "0.3", features = [
 ] }
 wgpu = "29.0.1"
 bytemuck = { version = "1", features = ["derive"] }
-nalgebra = "0.33"
-spade = "2"

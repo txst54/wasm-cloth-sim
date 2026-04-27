@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
-use web_sys::console;
+
+use crate::{platform_log, platform_warn};
 
 /// When true, uses higher resolution mesh near crease lines.
 /// When false, uses uniform grid resolution everywhere.
@@ -264,17 +265,17 @@ impl CreasePattern {
         }
 
         // Debug: print split creases count
-        console::log_1(&format!(
+        platform_log!(
             "After splitting: {} segments (from {} original)",
             split_creases.len(), self.lines.len()
-        ).into());
+        );
 
         // Debug: print unique vertices count
-        console::log_1(&format!("Unique vertices: {}", unique_verts.len()).into());
+        platform_log!("Unique vertices: {}", unique_verts.len());
 
         // Debug: print first 10 vertices
         for (i, v) in unique_verts.iter().enumerate().take(10) {
-            console::log_1(&format!("  Vertex {}: ({:.4}, {:.4})", i, v[0], v[1]).into());
+            platform_log!("  Vertex {}: ({:.4}, {:.4})", i, v[0], v[1]);
         }
 
         // 4. Build constrained Delaunay triangulation
@@ -297,10 +298,10 @@ impl CreasePattern {
                 collinear_added += 1;
             }
         }
-        console::log_1(&format!(
+        platform_log!(
             "Added {} collinear constraints (of {} found)",
             collinear_added, collinear_constraints.len()
-        ).into());
+        );
 
         // All constraint edges should succeed since segments were pre-split at intersections
         let mut constraint_edges: Vec<(usize, usize, CreaseType)> = Vec::new();
@@ -321,16 +322,16 @@ impl CreasePattern {
         }
 
         // Debug: print constraint edges count
-        console::log_1(&format!(
+        platform_log!(
             "Constraint edges (ALL creases): {}",
             constraint_edges.len()
-        ).into());
+        );
 
         if failed_constraints > 0 {
-            console::warn_1(&format!(
+            platform_warn!(
                 "Crease pattern: {} constraint edge(s) could not be added (unexpected)",
                 failed_constraints
-            ).into());
+            );
         }
 
         // 4. Build vertex index map from handle to our index
@@ -366,7 +367,7 @@ impl CreasePattern {
         let faces = fix_collinear_triangles(&faces, &unique_verts);
 
         // Debug: print CDT results
-        console::log_1(&format!("CDT produced {} triangles (after fix)", faces.len()).into());
+        platform_log!("CDT produced {} triangles (after fix)", faces.len());
 
         // Count unique edges from faces
         let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
@@ -378,7 +379,7 @@ impl CreasePattern {
             edge_set.insert(e2);
             edge_set.insert(e3);
         }
-        console::log_1(&format!("Total edges in mesh: {}", edge_set.len()).into());
+        platform_log!("Total edges in mesh: {}", edge_set.len());
 
         // Convert positions to f32 with z=0
         let positions: Vec<[f32; 3]> = unique_verts
