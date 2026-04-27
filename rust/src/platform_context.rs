@@ -37,6 +37,15 @@ impl PlatformContext {
             guard.as_ref().map_or(0.0, |ctx| ctx.timer.now_ms())
         })
     }
+
+    pub fn set_step(step: usize) {
+        PLATFORM.with(|p| {
+            let guard = p.borrow();
+            if let Some(ctx) = guard.as_ref() {
+                ctx.logger.set_step(step);
+            }
+        })
+    }
 }
 
 /// Log an informational message via the platform logger.
@@ -60,5 +69,13 @@ macro_rules! platform_warn {
 macro_rules! platform_error {
     ($($arg:tt)*) => {
         $crate::platform_context::PlatformContext::with_logger(|l| l.error(&format!($($arg)*)))
+    };
+}
+
+/// Log a message every `interval` steps. `max_per_step` limits logs per step (-1 = unlimited).
+#[macro_export]
+macro_rules! platform_log_interval {
+    ($interval:expr, $max:expr, $($arg:tt)*) => {
+        $crate::platform_context::PlatformContext::with_logger(|l| l.log_interval(&format!($($arg)*), $interval, $max))
     };
 }

@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 use nalgebra as na;
 
 use crate::params::SimParams;
-use crate::{platform_log, platform_warn};
+use crate::{platform_log, platform_warn, platform_log_interval};
 use super::shared::{Positions, ClothSimCore};
 use super::crease::{CreasePattern, CreaseType, find_edges_on_creases, find_overlapping_edges};
 
@@ -428,15 +428,10 @@ fn apply_hinge_xpbd(
     let dl = -(c_val + alpha_tilde * *lambda + gamma * grad_dot_dx) / denom;
     *lambda += dl;
 
-    // Debug: log every ~3000 calls
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if count % 3000 == 0 {
-        platform_log!(
-            "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
-            theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
-        );
-    }
+    platform_log_interval!(100, 1,
+        "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
+        theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
+    );
 
     add_scaled(q, a, wa * dl * g_a);
     add_scaled(q, b, wb * dl * g_b);

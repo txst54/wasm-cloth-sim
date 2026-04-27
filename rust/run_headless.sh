@@ -1,1 +1,1 @@
-target/release/native paper ../public/assets/waterbomb.cp --steps 200 --settings settings/paper.json
+target/release/native paper ../public/assets/yaccho.cp --steps 10000 --settings settings/paper.json --resolution 1 --target_angle 90

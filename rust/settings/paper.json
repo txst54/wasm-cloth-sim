@@ -17,5 +17,6 @@
   "self_collision_recompute_iters": 1,
   "use_distance_constraints": false,
   "damping": 0.7,
-  "resolution": 32
+  "resolution": 32,
+  "warmup_steps": 1000
 }

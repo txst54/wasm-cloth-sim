@@ -34,6 +34,8 @@ pub struct SimParams {
     pub damping: f64,
     /// Grid resolution for mesh generation (default 32).
     pub resolution: u32,
+    /// Number of warmup steps to run at target_angle=0 before applying the target fold angle.
+    pub warmup_steps: u32,
 }
 
 impl Default for SimParams {
@@ -64,6 +66,7 @@ impl Default for SimParams {
             use_distance_constraints: false,
             damping: 0.0,
             resolution: 32,
+            warmup_steps: 0,
         }
     }
 }

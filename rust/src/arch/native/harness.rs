@@ -6,6 +6,7 @@ use super::platform::init_platform;
 use crate::sim::{ClothSimCore, PaperSim, CreasePattern, Positions};
 use crate::params::SimParams;
 use crate::platform_log;
+use crate::platform_context::PlatformContext;
 
 /// Run a headless cloth simulation for debugging.
 pub fn run_cloth_headless(steps: usize, resolution: usize, params: &SimParams) {
@@ -22,12 +23,13 @@ pub fn run_cloth_headless(steps: usize, resolution: usize, params: &SimParams) {
     let start = std::time::Instant::now();
 
     for step in 0..steps {
+        PlatformContext::set_step(step);
         sim.step(params, &HashSet::new());
 
         if step % 100 == 0 {
             let avg = compute_average_position(&sim.q);
-            platform_log!("Step {}: avg position = ({:.4}, {:.4}, {:.4})",
-                          step, avg[0], avg[1], avg[2]);
+            platform_log!("avg position = ({:.4}, {:.4}, {:.4})",
+                         avg[0], avg[1], avg[2]);
         }
     }
 
@@ -37,31 +39,61 @@ pub fn run_cloth_headless(steps: usize, resolution: usize, params: &SimParams) {
 }
 
 /// Run paper simulation from a .cp file (headless).
-pub fn run_paper_headless(cp_data: &str, steps: usize, params: &SimParams) {
+/// `target_angle`: fold angle in degrees (0-90). Simulation warms up at 0 degrees
+/// for `params.warmup_steps`, then applies the target angle.
+pub fn run_paper_headless(cp_data: &str, steps: usize, target_angle: f32, params: &SimParams) {
     init_platform();
 
     let resolution = params.resolution as usize;
+    let warmup_steps = params.warmup_steps as usize;
     let cp = CreasePattern::parse(cp_data).expect("Failed to parse crease pattern");
     let (mut sim, positions, faces, _, _) = PaperSim::from_crease_pattern(&cp, resolution);
 
     platform_log!("Loaded crease pattern: {} vertices, {} faces (resolution: {})",
                   positions.len(), faces.len(), resolution);
+    platform_log!("Warmup: {} steps at 0°, then {} steps at {}°",
+                  warmup_steps, steps, target_angle);
 
     let start = std::time::Instant::now();
 
-    for step in 0..steps {
+    // Warmup phase: run at target_angle = 0
+    sim.set_fold_angle(0.0);
+    for step in 0..warmup_steps {
+        PlatformContext::set_step(step);
         sim.step(params);
 
         if step % 100 == 0 {
             let avg = compute_average_position(&sim.q);
-            platform_log!("Step {}: avg position = ({:.4}, {:.4}, {:.4})",
-                          step, avg[0], avg[1], avg[2]);
+            platform_log!("Warmup: avg position = ({:.4}, {:.4}, {:.4})",
+                          avg[0], avg[1], avg[2]);
         }
     }
 
-    let elapsed = start.elapsed();
+    if warmup_steps > 0 {
+        let warmup_elapsed = start.elapsed();
+        platform_log!("Warmup complete in {:?}", warmup_elapsed);
+    }
+
+    // Main phase: apply target angle
+    sim.set_fold_angle(target_angle);
+    let main_start = std::time::Instant::now();
+
+    for step in 0..steps {
+        PlatformContext::set_step(warmup_steps + step);
+        sim.step(params);
+
+        // if step % 100 == 0 {
+        //     let avg = compute_average_position(&sim.q);
+        //     platform_log!("avg position = ({:.4}, {:.4}, {:.4})",
+        //                   avg[0], avg[1], avg[2]);
+        // }
+    }
+
+    let main_elapsed = main_start.elapsed();
+    let total_elapsed = start.elapsed();
     platform_log!("Completed {} steps in {:?} ({:.2} steps/sec)",
-                  steps, elapsed, steps as f64 / elapsed.as_secs_f64());
+                  steps, main_elapsed, steps as f64 / main_elapsed.as_secs_f64());
+    platform_log!("Total time (including warmup): {:?}", total_elapsed);
 }
 
 fn create_grid_positions(n: usize) -> Vec<[f32; 3]> {

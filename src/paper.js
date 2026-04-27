@@ -176,7 +176,7 @@ init().then(async () => {
 
   try {
     // Fetch the crease pattern file
-    const file = 'assets/yaccho.cp'
+    const file = 'assets/waterbomb.cp'
     const cpResponse = await fetch(file)
     if (cpResponse.ok) {
       const cpData = await cpResponse.text()
