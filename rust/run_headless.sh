@@ -1,0 +1,1 @@
+target/release/native paper ../public/assets/waterbomb.cp --steps 200 --settings settings/paper.json

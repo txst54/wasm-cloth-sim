@@ -25,13 +25,13 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --steps <n>        Number of simulation steps (default: 1000)");
-    eprintln!("  --resolution <n>   Grid resolution for cloth (default: 32)");
+    eprintln!("  --resolution <n>   Grid resolution for mesh (default: 32, or from settings)");
     eprintln!("  --settings <file>  Load simulation parameters from JSON file");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  native cloth --steps 500 --resolution 16");
     eprintln!("  native cloth --settings params.json");
-    eprintln!("  native paper crane.cp --steps 2000");
+    eprintln!("  native paper crane.cp --steps 2000 --resolution 64");
     eprintln!("  native dump-settings params.json");
 }
 
@@ -86,6 +86,7 @@ fn main() {
         "paper" => {
             let cp_file = args.get(2).expect("Missing crease pattern file");
             let mut steps = 1000usize;
+            let mut resolution: Option<usize> = None;
             let mut settings_file: Option<&str> = None;
 
             let mut i = 3;
@@ -95,6 +96,11 @@ fn main() {
                         i += 1;
                         steps = args.get(i).and_then(|s| s.parse().ok())
                             .expect("--steps requires a number");
+                    }
+                    "--resolution" => {
+                        i += 1;
+                        resolution = Some(args.get(i).and_then(|s| s.parse().ok())
+                            .expect("--resolution requires a number"));
                     }
                     "--settings" => {
                         i += 1;
@@ -115,7 +121,10 @@ fn main() {
 
             let cp_data = std::fs::read_to_string(cp_file)
                 .expect("Failed to read crease pattern file");
-            let params = load_params(settings_file);
+            let mut params = load_params(settings_file);
+            if let Some(res) = resolution {
+                params.resolution = res as u32;
+            }
             run_paper_headless(&cp_data, steps, &params);
         }
 

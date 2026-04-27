@@ -50,6 +50,8 @@ struct PaperAppState {
     params: Rc<RefCell<SimParams>>,
     canvas: HtmlCanvasElement,
     keys:   [bool; 8],
+    cp_data: Option<String>,
+    resolution: usize,
 }
 
 struct RigidAppState {
@@ -609,16 +611,16 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
         .get_element_by_id(canvas_id).unwrap()
         .dyn_into::<HtmlCanvasElement>().unwrap();
 
-    const RESOLUTION: usize = 32;
+    let resolution = PARAMS.with(|p| p.borrow().resolution as usize);
     let ctx    = GpuContext::new(canvas.clone()).await?;
     let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
     let camera = Camera::new(&ctx);
-    let cloth  = Cloth::new(&ctx, RESOLUTION as u32, &light);
+    let cloth  = Cloth::new(&ctx, resolution as u32, &light);
 
-    let mut sim = PaperSim::from_grid(RESOLUTION);
+    let mut sim = PaperSim::from_grid(resolution);
 
     // Register a center vertical fold: all interior edges at column n/2.
-    let n   = RESOLUTION;
+    let n   = resolution;
     let col = n / 2;
     let mut fold_map: HashMap<(u32, u32), FoldSpec> = HashMap::new();
     for row in 0..(n - 1) {
@@ -634,6 +636,8 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
         keys: [false; 8],
+        cp_data: None,
+        resolution,
     }));
     PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -813,6 +817,7 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
         .get_element_by_id(canvas_id).unwrap()
         .dyn_into::<HtmlCanvasElement>().unwrap();
 
+    let resolution = PARAMS.with(|p| p.borrow().resolution as usize);
     let ctx = GpuContext::new(canvas.clone()).await?;
     let light = Light::new(&ctx, [2.0, 0.0, 0.5]);
     let camera = Camera::new(&ctx);
@@ -820,7 +825,7 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
     // Parse creasepattern and build mesh
     let cp = CreasePattern::parse(cp_data)
         .map_err(|e| JsValue::from_str(&e))?;
-    let (sim, positions, faces, colors, edge_colors) = PaperSim::from_crease_pattern(&cp);
+    let (sim, positions, faces, colors, edge_colors) = PaperSim::from_crease_pattern(&cp, resolution);
     let cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
 
     let state = Rc::new(RefCell::new(PaperAppState {
@@ -828,6 +833,8 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(),
         keys: [false; 8],
+        cp_data: Some(cp_data.to_string()),
+        resolution,
     }));
     PAPER_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -1088,6 +1095,53 @@ pub fn set_wireframe_enabled(enabled: bool) {
     PAPER_APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             state.borrow_mut().cloth.wireframe_enabled = enabled;
+        }
+    });
+}
+
+/// Set the resolution for paper simulation, reloading the mesh/crease pattern.
+#[wasm_bindgen]
+pub fn set_paper_resolution(v: u32) {
+    PARAMS.with(|p| p.borrow_mut().resolution = v);
+    PAPER_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            let resolution = v as usize;
+
+            if let Some(ref cp_data) = s.cp_data {
+                // Rebuild from crease pattern
+                if let Ok(cp) = CreasePattern::parse(cp_data) {
+                    let (sim, positions, faces, colors, edge_colors) =
+                        PaperSim::from_crease_pattern(&cp, resolution);
+                    s.cloth = Cloth::from_mesh(&s.ctx, positions, faces, colors, edge_colors, &s.light);
+                    s.sim = sim;
+                    s.resolution = resolution;
+                }
+            } else {
+                // Rebuild simple grid
+                let mut sim = PaperSim::from_grid(resolution);
+
+                // Re-register center vertical fold
+                let n = resolution;
+                let col = n / 2;
+                let mut fold_map: HashMap<(u32, u32), FoldSpec> = HashMap::new();
+                for row in 0..(n - 1) {
+                    let a = (row * n + col) as u32;
+                    let b = ((row + 1) * n + col) as u32;
+                    let lo = a.min(b); let hi = a.max(b);
+                    fold_map.insert((lo, hi), FoldSpec {
+                        target_angle: std::f32::consts::PI,
+                        compliance: 1e-4,
+                        direction: FoldDirection::Mountain,
+                        damping: 0.5,
+                    });
+                }
+                sim.set_fold_map(fold_map);
+
+                s.cloth = Cloth::new(&s.ctx, resolution as u32, &s.light);
+                s.sim = sim;
+                s.resolution = resolution;
+            }
         }
     });
 }

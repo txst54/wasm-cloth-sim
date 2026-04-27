@@ -108,11 +108,11 @@ impl PaperSim {
         }
     }
 
-    /// Create PaperSim from a crease pattern overlaid on a 64x64 grid.
-    /// Returns (PaperSim, positions, faces, colors) for building Cloth.
-    pub fn from_crease_pattern(cp: &CreasePattern) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
-        const GRID_RES: usize = 1;
-        let (positions, faces, fold_edges, crease_chains, split_creases) = cp.build_mesh(GRID_RES);
+    /// Create PaperSim from a crease pattern overlaid on a grid.
+    /// `resolution`: grid resolution for mesh generation (higher = more triangles)
+    /// Returns (PaperSim, positions, faces, colors, edge_colors) for building Cloth.
+    pub fn from_crease_pattern(cp: &CreasePattern, resolution: usize) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
+        let (positions, faces, fold_edges, crease_chains, split_creases) = cp.build_mesh(resolution);
 
         // Find top-right corner vertex to pin (closest to (0.9, 0.9))
         let mut pin_idx = 0usize;

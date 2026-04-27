@@ -32,6 +32,8 @@ pub struct SimParams {
     /// Velocity damping applied after each step: v *= (1 - damping).
     /// 0.0 = no damping (default); 0.05 = 5% reduction per step.
     pub damping: f64,
+    /// Grid resolution for mesh generation (default 32).
+    pub resolution: u32,
 }
 
 impl Default for SimParams {
@@ -61,6 +63,7 @@ impl Default for SimParams {
             self_collision_recompute_iters: 1,
             use_distance_constraints: false,
             damping: 0.0,
+            resolution: 32,
         }
     }
 }

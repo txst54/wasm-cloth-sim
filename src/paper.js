@@ -6,6 +6,7 @@ import init, {
   set_paper_fold_speed,
   set_paper_hinge_compliance,
   set_paper_hinge_damping,
+  set_paper_resolution,
   set_time_step,
   set_constraint_iters,
   set_gravity_enabled,
@@ -45,6 +46,13 @@ function buildPanel() {
     label: 'show wireframe',
     checked: false,
     onChange: set_wireframe_enabled,
+  }))
+
+  // Resolution slider (reloads mesh)
+  panel.appendChild(SliderRow({
+    label: 'resolution',
+    min: 1, max: 64, step: 1, value: 32,
+    onChange: v => set_paper_resolution(Math.round(v)),
   }))
 
   panel.appendChild(Divider())

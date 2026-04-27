@@ -40,11 +40,12 @@ pub fn run_cloth_headless(steps: usize, resolution: usize, params: &SimParams) {
 pub fn run_paper_headless(cp_data: &str, steps: usize, params: &SimParams) {
     init_platform();
 
+    let resolution = params.resolution as usize;
     let cp = CreasePattern::parse(cp_data).expect("Failed to parse crease pattern");
-    let (mut sim, positions, faces, _, _) = PaperSim::from_crease_pattern(&cp);
+    let (mut sim, positions, faces, _, _) = PaperSim::from_crease_pattern(&cp, resolution);
 
-    platform_log!("Loaded crease pattern: {} vertices, {} faces",
-                  positions.len(), faces.len());
+    platform_log!("Loaded crease pattern: {} vertices, {} faces (resolution: {})",
+                  positions.len(), faces.len(), resolution);
 
     let start = std::time::Instant::now();
 
