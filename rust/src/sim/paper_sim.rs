@@ -2,12 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 
 use nalgebra as na;
-use web_sys::console;
 
-use crate::{cloth::Cloth, gpu::GpuContext, params::SimParams};
+use crate::params::SimParams;
+use crate::{platform_log, platform_warn, platform_log_interval};
 use super::shared::{Positions, ClothSimCore};
-use super::traits::MeshSim;
-use super::crease::{CreasePattern, CreaseType};
+use super::crease::{CreasePattern, CreaseType, find_edges_on_creases, find_overlapping_edges};
 
 // ── Fold specification ────────────────────────────────────────────────────────
 
@@ -30,6 +29,10 @@ pub struct FoldSpec {
     pub compliance: f32,
     /// Direction of fold (mountain vs valley).
     pub direction: FoldDirection,
+    /// XPBD constraint damping β (stiffness, not inverse).
+    /// Damps velocity along the constraint gradient.  Typical range: 0 … 10.
+    /// Default 0 means no additional damping beyond implicit numerical damping.
+    pub damping: f32,
 }
 
 // ── HingeConstraint ───────────────────────────────────────────────────────────
@@ -53,6 +56,8 @@ pub struct HingeConstraint {
     pub current_angle: f32,
     pub compliance: f32,
     pub direction: FoldDirection,
+    /// XPBD constraint damping β (stiffness, not inverse).
+    pub damping: f32,
     /// XPBD Lagrange multiplier (reset each substep).
     pub lambda: f32,
 }
@@ -90,12 +95,11 @@ impl DerefMut for PaperSim {
 }
 
 impl PaperSim {
-    pub fn from_cloth(cloth: &Cloth) -> Self {
+    /// Create a PaperSim from an NxN grid (used for simple paper demos).
+    pub fn from_grid(resolution: usize) -> Self {
+        let n = resolution;
         Self {
-            core: {
-                let n = cloth.resolution as usize;
-                ClothSimCore::from_cloth(cloth, &[(n-1)*n + (n-1)]) // upper-right only
-            },
+            core: ClothSimCore::from_grid(n, &[(n-1)*n + (n-1)]),
             hinges: Vec::new(),
             fold_speed: 5.0,
             crease_chains: Vec::new(),
@@ -104,25 +108,11 @@ impl PaperSim {
         }
     }
 
-    /// Create PaperSim from a crease pattern overlaid on a 64x64 grid.
-    /// Returns (PaperSim, positions, faces, colors) for building Cloth.
-    pub fn from_crease_pattern(cp: &CreasePattern) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
-        const GRID_RES: usize = 1;
-        let (positions, faces, fold_edges, crease_chains) = cp.build_mesh(GRID_RES);
-
-        // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
-        let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
-
-        // Color vertices that are part of fold edges
-        for (&(a, b), &crease_type) in &fold_edges {
-            let color = match crease_type {
-                CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
-                CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
-                CreaseType::Boundary => [0.85, 0.85, 0.85],
-            };
-            vertex_colors[a as usize] = color;
-            vertex_colors[b as usize] = color;
-        }
+    /// Create PaperSim from a crease pattern overlaid on a grid.
+    /// `resolution`: grid resolution for mesh generation (higher = more triangles)
+    /// Returns (PaperSim, positions, faces, colors, edge_colors) for building Cloth.
+    pub fn from_crease_pattern(cp: &CreasePattern, resolution: usize) -> (Self, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>, HashMap<(u32, u32), CreaseType>) {
+        let (positions, faces, fold_edges, crease_chains, split_creases) = cp.build_mesh(resolution);
 
         // Find top-right corner vertex to pin (closest to (0.9, 0.9))
         let mut pin_idx = 0usize;
@@ -137,6 +127,58 @@ impl PaperSim {
 
         // Build SimCore from mesh with top corner pinned
         let core = ClothSimCore::from_mesh(&positions, &faces, &[]);
+
+        // Check for duplicate/overlapping edges in the mesh
+        let overlapping = find_overlapping_edges(&positions, &core.edges, 1e-6);
+        if !overlapping.is_empty() {
+            platform_warn!(
+                "WARNING: Found {} overlapping edge pairs in mesh!",
+                overlapping.len()
+            );
+            for (e1, e2) in &overlapping {
+                platform_warn!(
+                    "  Overlap: edge [{}, {}] and edge [{}, {}]",
+                    e1[0], e1[1], e2[0], e2[1]
+                );
+            }
+        } else {
+            platform_log!("No overlapping edges found in mesh");
+        }
+
+        // Check ALL mesh edges against crease lines to find edges that lie on creases
+        // This catches edges that the triangulation created that happen to align with creases
+        let tolerance = 1e-6; // tolerance for "on crease" check
+        let edges_on_creases = find_edges_on_creases(&positions, &core.edges, &split_creases, tolerance);
+
+        // Merge fold_edges (from CDT constraints) with edges_on_creases (geometric check)
+        let mut all_fold_edges: HashMap<(u32, u32), CreaseType> = fold_edges.clone();
+        let mut extra_edges = 0usize;
+        for (edge, crease_type) in &edges_on_creases {
+            if !all_fold_edges.contains_key(edge) {
+                all_fold_edges.insert(*edge, *crease_type);
+                extra_edges += 1;
+            }
+        }
+        if extra_edges > 0 {
+            platform_log!(
+                "Found {} additional edges lying on crease lines",
+                extra_edges
+            );
+        }
+
+        // Generate colors: white for normal faces, red-ish for mountain, blue-ish for valley
+        let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
+
+        // Color vertices that are part of fold edges
+        for (&(a, b), &crease_type) in &all_fold_edges {
+            let color = match crease_type {
+                CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
+                CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
+                CreaseType::Boundary => [0.85, 0.85, 0.85],
+            };
+            vertex_colors[a as usize] = color;
+            vertex_colors[b as usize] = color;
+        }
 
         // Build crease-bend triples from chains: for each consecutive (A,B,C),
         // B is the interior vertex that should stay on line AC.
@@ -157,10 +199,10 @@ impl PaperSim {
             crease_bends,
         };
 
-        // Build fold map from crease pattern edges
+        // Build fold map from all fold edges (CDT constraints + geometric matches)
         let mut fold_map: HashMap<(u32, u32), FoldSpec> = HashMap::new();
-        let edge_colors = fold_edges.clone();
-        for ((a, b), crease_type) in fold_edges {
+        let edge_colors = all_fold_edges.clone();
+        for ((a, b), crease_type) in all_fold_edges {
             let direction = match crease_type {
                 CreaseType::Mountain => FoldDirection::Mountain,
                 CreaseType::Valley => FoldDirection::Valley,
@@ -170,6 +212,7 @@ impl PaperSim {
                 target_angle: 0.0,  // start flat (0 = unfolded)
                 compliance: 1e-4,
                 direction,
+                damping: 0.5,
             });
         }
         sim.set_fold_map(fold_map);
@@ -203,6 +246,7 @@ impl PaperSim {
                     current_angle: 0.0,
                     compliance: spec.compliance,
                     direction: spec.direction,
+                    damping: spec.damping,
                     lambda: 0.0,
                 });
             } else {
@@ -210,20 +254,20 @@ impl PaperSim {
             }
         }
         if dropped_edges > 0 {
-            console::warn_1(&format!(
+            platform_warn!(
                 "PaperSim: {} fold edge(s) have no corresponding diamond (boundary edges or triangulation mismatch)",
                 dropped_edges
-            ).into());
+            );
         }
 
         let mountain_count = self.hinges.iter().filter(|h| h.direction == FoldDirection::Mountain).count();
         let valley_count = self.hinges.iter().filter(|h| h.direction == FoldDirection::Valley).count();
-        console::log_1(&format!(
+        platform_log!(
             "Hinges: {} total, rest ≈ {:.3}, {} mountain, {} valley",
             self.hinges.len(),
             self.hinges.first().map_or(0.0, |h| h.rest_angle),
             mountain_count, valley_count
-        ).into());
+        );
     }
 
     /// Set the fold angle for all hinges.
@@ -267,16 +311,18 @@ impl PaperSim {
             self.core.solve_pins(params);
             self.core.solve_pulling(params);
 
-            // Hinge dihedral constraints
+            // Hinge dihedral constraints with XPBD damping
             for h in &mut self.hinges {
                 let [a, b, c, d] = self.core.diamonds[h.diamond_idx];
                 let alpha_tilde = h.compliance / (dt * dt);
+                // γ = α̃ β̃ / Δt = (compliance/dt²)(dt²·damping)/dt = compliance·damping/dt
+                let gamma = h.compliance * h.damping / dt;
                 let goal_dihedral = h.rest_angle + h.current_angle;
 
                 apply_hinge_xpbd(
-                    &mut self.core.q, &self.core.w,
+                    &mut self.core.q, &self.core.q_prev, &self.core.w,
                     a as usize, b as usize, c as usize, d as usize,
-                    goal_dihedral, alpha_tilde, &mut h.lambda,
+                    goal_dihedral, alpha_tilde, gamma, &mut h.lambda,
                 );
             }
 
@@ -299,40 +345,32 @@ impl PaperSim {
         self.core.update_velocity(params);
     }
 
-    pub fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) {
-        self.core.write_to_cloth(cloth, ctx);
-    }
-}
-
-impl MeshSim for PaperSim {
-    fn step(&mut self, params: &SimParams)                        { self.step(params); }
-    fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) { self.core.write_to_cloth(cloth, ctx); }
-    fn positions(&self) -> &Positions                             { &self.core.q }
-    fn set_clicked_vertex(&mut self, vi: Option<usize>)           { self.core.clicked_vertex = vi; }
-    fn set_mouse_pos(&mut self, pos: [f32; 3])                    { self.core.mouse_pos = pos; }
 }
 
 // ── XPBD dihedral-angle constraint ───────────────────────────────────────────
 
-/// XPBD dihedral-angle constraint (Müller et al. 2020).
+/// XPBD dihedral-angle constraint with Rayleigh damping (Macklin et al. 2016 §5).
 ///
 /// Unlike plain PBD this accumulates the Lagrange multiplier `λ` across
 /// iterations within the same substep, which prevents the large-angle
 /// overcorrection that caused divergence under the old PBD formulation.
 ///
-/// Formula:
+/// Damped formula (equation 26 from the paper):
 /// ```text
-/// Δλ = -(C + α̃ λ) / (Σ wᵢ |∇C|² + α̃)
+/// γ = α̃ β̃ / Δt = compliance · damping / dt
+/// Δλ = -(C + α̃ λ + γ ∇C·(x - x^n)) / ((1+γ) Σ wᵢ |∇C|² + α̃)
 /// λ  += Δλ
 /// Δpᵢ = wᵢ Δλ ∇C_i
 /// ```
-/// where `α̃ = α / dt²` and the constraint `C = θ − θ_goal`.
+/// where `α̃ = α / dt²`, `β̃ = dt² β`, and the constraint `C = θ − θ_goal`.
 fn apply_hinge_xpbd(
     q:           &mut Positions,
+    q_prev:      &Positions,
     w:           &na::DVector<f32>,
     a: usize, b: usize, c: usize, d: usize,
     goal_angle:  f32,
     alpha_tilde: f32,   // compliance / dt²
+    gamma:       f32,   // compliance * damping / dt
     lambda:      &mut f32,
 ) {
     let p1 = row3(q, a); let p2 = row3(q, b);
@@ -351,14 +389,15 @@ fn apply_hinge_xpbd(
 
     let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
     let sin_t = n1h.cross(&n2h).dot(&e_hat);
-    let theta = sin_t.atan2(cos_t);
+    let raw_theta = sin_t.atan2(cos_t);
+    // Shift by π so flat = 0 (matching dihedral_angle convention)
+    let theta = {
+        let shifted = raw_theta + std::f32::consts::PI;
+        (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
+    };
 
-    let mut c_val = theta - goal_angle;
-    // Wrap to [-π, π] for shortest angular path (handles ±π equivalence)
-    let mut c_val = theta - goal_angle;
-    c_val = (c_val + std::f32::consts::PI)
-        .rem_euclid(2.0 * std::f32::consts::PI)
-        - std::f32::consts::PI;
+    // C = θ - goal, already in [-π, π] range
+    let c_val = theta - goal_angle;
     if c_val.abs() < 1e-4 { return; }
 
     // Gradients ∂θ/∂pᵢ  (same derivation as PBD bending, Müller 2006 §4)
@@ -371,27 +410,28 @@ fn apply_hinge_xpbd(
 
     let wa = w[a]; let wb = w[b]; let wc = w[c]; let wd = w[d];
 
-    // XPBD denominator includes compliance term, bounding per-iteration correction.
+    // Damping term: γ ∇C·(x - x^n)
+    let dx_a = p1 - row3(q_prev, a);
+    let dx_b = p2 - row3(q_prev, b);
+    let dx_c = p3 - row3(q_prev, c);
+    let dx_d = p4 - row3(q_prev, d);
+    let grad_dot_dx = g_a.dot(&dx_a) + g_b.dot(&dx_b) + g_c.dot(&dx_c) + g_d.dot(&dx_d);
+
+    // XPBD denominator includes compliance and damping terms
     let weighted_grads = wa * g_a.norm_squared()
                        + wb * g_b.norm_squared()
                        + wc * g_c.norm_squared()
                        + wd * g_d.norm_squared();
-    let denom = weighted_grads + alpha_tilde;
+    let denom = (1.0 + gamma) * weighted_grads + alpha_tilde;
     if denom < 1e-12 { return; }
 
-    let dl = -(c_val + alpha_tilde * *lambda) / denom;
+    let dl = -(c_val + alpha_tilde * *lambda + gamma * grad_dot_dx) / denom;
     *lambda += dl;
 
-    // Debug: log every ~3000 calls
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if count % 3000 == 0 {
-        console::log_1(&format!(
-            "θ={:.3} goal={:.3} c={:.4} dl={:.6} |g|={:.3},{:.3},{:.3},{:.3} α̃={:.2e}",
-            theta, goal_angle, c_val, dl,
-            g_a.norm(), g_b.norm(), g_c.norm(), g_d.norm(), alpha_tilde
-        ).into());
-    }
+    platform_log_interval!(100, 1,
+        "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
+        theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
+    );
 
     add_scaled(q, a, wa * dl * g_a);
     add_scaled(q, b, wb * dl * g_b);
@@ -462,20 +502,26 @@ fn normalise_edge(a: u32, b: u32) -> (u32, u32) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+/// Compute dihedral "fold angle" for a diamond.
+/// Returns 0 for a flat mesh, negative for mountain folds, positive for valley folds.
+/// Range: [-π, π]
 fn dihedral_angle(q: &Positions, a: u32, b: u32, c: u32, d: u32) -> f32 {
     let p1 = row3(q, a as usize); let p2 = row3(q, b as usize);
     let p3 = row3(q, c as usize); let p4 = row3(q, d as usize);
     let e = p2 - p1;
     let e_len = e.norm();
-    if e_len < 1e-8 { return std::f32::consts::PI; }
+    if e_len < 1e-8 { return 0.0; }
     let e_hat = e / e_len;
     let n1 = (p2 - p1).cross(&(p3 - p1));
     let n2 = (p2 - p1).cross(&(p4 - p1));
     let n1l = n1.norm(); let n2l = n2.norm();
-    if n1l < 1e-8 || n2l < 1e-8 { return std::f32::consts::PI; }
+    if n1l < 1e-8 || n2l < 1e-8 { return 0.0; }
     let n1h = n1 / n1l; let n2h = n2 / n2l;
     let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
-    n1h.cross(&n2h).dot(&e_hat).atan2(cos_t)
+    let raw = n1h.cross(&n2h).dot(&e_hat).atan2(cos_t);
+    // Shift by π so flat (raw = ±π) becomes 0, and normalize to [-π, π]
+    let shifted = raw + std::f32::consts::PI;
+    (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
 }
 
 #[inline]

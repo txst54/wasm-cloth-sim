@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use web_sys::console;
 
 use nalgebra as na;
 
-use crate::{bvh::Bvh, cloth::Cloth, gpu::GpuContext, params::SimParams};
+use crate::params::SimParams;
+use crate::platform_context::PlatformContext;
+use crate::{bvh::Bvh};
 
 /// Nx3 matrix of vertex positions / velocities.
 pub type Positions = na::OMatrix<f32, na::Dyn, na::Const<3>>;
@@ -13,7 +14,7 @@ pub type Faces = na::OMatrix<u32, na::Dyn, na::Const<3>>;
 
 #[inline]
 fn now_ms() -> f64 {
-    web_sys::window().unwrap().performance().unwrap().now()
+    PlatformContext::now_ms()
 }
 
 // ── Spatial hash ─────────────────────────────────────────────────────────────
@@ -782,13 +783,21 @@ pub struct ClothSimCore {
 }
 
 impl ClothSimCore {
-    pub fn from_cloth(cloth: &Cloth, pinned: &[usize]) -> Self {
-        let n = cloth.resolution as usize;
+    /// Create a ClothSimCore from an NxN grid (used for simple cloth demos).
+    pub fn from_grid(resolution: usize, pinned: &[usize]) -> Self {
+        let n = resolution;
         let num_verts = n * n;
 
         let mut q = Positions::zeros(num_verts);
-        for (i, pos) in cloth.positions.iter().enumerate() {
-            q[(i,0)] = pos[0]; q[(i,1)] = pos[1]; q[(i,2)] = pos[2];
+        for row in 0..n {
+            for col in 0..n {
+                let i = row * n + col;
+                let x = (col as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let y = (row as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                q[(i, 0)] = x * 0.9;
+                q[(i, 1)] = y * 0.9;
+                q[(i, 2)] = 0.0;
+            }
         }
         let q_rest = q.clone();
         let q_prev = q.clone();
@@ -829,7 +838,7 @@ impl ClothSimCore {
         let mut triangle_hash = TriangleSpatialHash::new(tri_cell_size);
         triangle_hash.rebuild(&q, &q_prev, &faces);
 
-        let rest_edge = edge_rest_lengths[0]; // or average
+        let rest_edge = edge_rest_lengths[0];
         let edge_cell_size = (2.0 * rest_edge).max(0.02);
 
         let mut edge_hash = EdgeSpatialHash::new(tri_cell_size);
@@ -1681,12 +1690,6 @@ impl ClothSimCore {
         out
     }
 
-    pub fn write_to_cloth(&self, cloth: &mut Cloth, ctx: &GpuContext) {
-        for (i, pos) in cloth.positions.iter_mut().enumerate() {
-            pos[0] = self.q[(i,0)]; pos[1] = self.q[(i,1)]; pos[2] = self.q[(i,2)];
-        }
-        cloth.upload(ctx);
-    }
 }
 
 // ── SimCore ───────────────────────────────────────────────────────────────────

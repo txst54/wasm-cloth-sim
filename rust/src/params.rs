@@ -1,3 +1,6 @@
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "native", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "native", serde(default))]
 pub struct SimParams {
     pub time_step:         f64,
     pub constraint_iters:  u32,
@@ -29,6 +32,10 @@ pub struct SimParams {
     /// Velocity damping applied after each step: v *= (1 - damping).
     /// 0.0 = no damping (default); 0.05 = 5% reduction per step.
     pub damping: f64,
+    /// Grid resolution for mesh generation (default 32).
+    pub resolution: u32,
+    /// Number of warmup steps to run at target_angle=0 before applying the target fold angle.
+    pub warmup_steps: u32,
 }
 
 impl Default for SimParams {
@@ -58,6 +65,8 @@ impl Default for SimParams {
             self_collision_recompute_iters: 1,
             use_distance_constraints: false,
             damping: 0.0,
+            resolution: 32,
+            warmup_steps: 0,
         }
     }
 }

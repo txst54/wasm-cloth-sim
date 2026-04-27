@@ -5,6 +5,8 @@ import init, {
   set_paper_fold_angle,
   set_paper_fold_speed,
   set_paper_hinge_compliance,
+  set_paper_hinge_damping,
+  set_paper_resolution,
   set_time_step,
   set_constraint_iters,
   set_gravity_enabled,
@@ -46,6 +48,13 @@ function buildPanel() {
     onChange: set_wireframe_enabled,
   }))
 
+  // Resolution slider (reloads mesh)
+  panel.appendChild(SliderRow({
+    label: 'resolution',
+    min: 1, max: 64, step: 1, value: 32,
+    onChange: v => set_paper_resolution(Math.round(v)),
+  }))
+
   panel.appendChild(Divider())
 
   // ── Fold control ──────────────────────────────────────────────────────────
@@ -72,6 +81,13 @@ function buildPanel() {
     label: 'compliance (1e-x)',
     min: 2, max: 6, step: 0.1, value: 4,
     onChange: v => set_paper_hinge_compliance(Math.pow(10, -v)),
+  }))
+
+  // XPBD constraint damping for hinges
+  panel.appendChild(SliderRow({
+    label: 'hinge damping',
+    min: 0, max: 5, step: 0.1, value: 0.5,
+    onChange: set_paper_hinge_damping,
   }))
 
   panel.appendChild(Divider())
@@ -149,7 +165,7 @@ function buildPanel() {
 init().then(async () => {
   // Paper sim defaults
   set_gravity_enabled(false)
-  set_self_collision_enabled(true)
+  set_self_collision_enabled(false)
   // set_use_distance_constraints(true)
   set_bending_enabled(true)
   set_stretch_weight(1.0)

@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
-use web_sys::console;
+
+use crate::{platform_log, platform_warn};
 
 /// When true, uses higher resolution mesh near crease lines.
 /// When false, uses uniform grid resolution everywhere.
@@ -101,16 +102,18 @@ impl CreasePattern {
     /// `grid_res`: base grid resolution (e.g., 32)
     /// `crease_res`: resolution near creases (e.g., 128) - if 0, uses grid_res
     /// `band_width`: width of refinement band around creases (in grid cells)
-    /// Returns (positions, faces, fold_edges, crease_chains) where:
+    /// Returns (positions, faces, fold_edges, crease_chains, split_creases) where:
     /// - fold_edges maps edge (min,max) to CreaseType
     /// - crease_chains contains vertex index chains for each non-boundary crease
-    pub fn build_mesh(&self, grid_res: usize) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<(u32, u32), CreaseType>, Vec<Vec<u32>>) {
-        if USE_ADAPTIVE_MESH {
+    /// - split_creases contains the normalized crease segments for edge-on-crease checking
+    pub fn build_mesh(&self, grid_res: usize) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<(u32, u32), CreaseType>, Vec<Vec<u32>>, Vec<([f64; 2], [f64; 2], CreaseType)>) {
+        let (positions, faces, fold_edges, crease_chains, split_creases) = if USE_ADAPTIVE_MESH {
             self.build_mesh_adaptive(grid_res, grid_res * 2, 1)
         } else {
             // Uniform grid - no refinement near creases
             self.build_mesh_adaptive(grid_res, grid_res, 0)
-        }
+        };
+        (positions, faces, fold_edges, crease_chains, split_creases)
     }
 
     pub fn build_mesh_adaptive(
@@ -118,7 +121,7 @@ impl CreasePattern {
         grid_res: usize,
         crease_res: usize,
         band_width: usize,
-    ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<(u32, u32), CreaseType>, Vec<Vec<u32>>) {
+    ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<(u32, u32), CreaseType>, Vec<Vec<u32>>, Vec<([f64; 2], [f64; 2], CreaseType)>) {
         let grid_spacing = if grid_res > 1 { 1.8 / (grid_res - 1) as f64 } else { 1.8 };
         let crease_spacing = if crease_res > 1 { 1.8 / (crease_res - 1) as f64 } else { 1.8 };
         let snap_eps = 1e-6;
@@ -261,6 +264,20 @@ impl CreasePattern {
             }
         }
 
+        // Debug: print split creases count
+        platform_log!(
+            "After splitting: {} segments (from {} original)",
+            split_creases.len(), self.lines.len()
+        );
+
+        // Debug: print unique vertices count
+        platform_log!("Unique vertices: {}", unique_verts.len());
+
+        // Debug: print first 10 vertices
+        for (i, v) in unique_verts.iter().enumerate().take(10) {
+            platform_log!("  Vertex {}: ({:.4}, {:.4})", i, v[0], v[1]);
+        }
+
         // 4. Build constrained Delaunay triangulation
         let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
             ConstrainedDelaunayTriangulation::new();
@@ -270,6 +287,21 @@ impl CreasePattern {
             let handle = cdt.insert(Point2::new(x, y)).unwrap();
             vertex_handles.push(handle);
         }
+
+        // Find collinear vertex groups and add constraints between consecutive vertices.
+        // This prevents spade from creating edges that skip intermediate collinear vertices.
+        let collinear_constraints = find_collinear_constraints(&unique_verts, &split_creases, snap_eps);
+        let mut collinear_added = 0usize;
+        for (a, b) in &collinear_constraints {
+            if cdt.can_add_constraint(vertex_handles[*a], vertex_handles[*b]) {
+                let _ = cdt.add_constraint(vertex_handles[*a], vertex_handles[*b]);
+                collinear_added += 1;
+            }
+        }
+        platform_log!(
+            "Added {} collinear constraints (of {} found)",
+            collinear_added, collinear_constraints.len()
+        );
 
         // All constraint edges should succeed since segments were pre-split at intersections
         let mut constraint_edges: Vec<(usize, usize, CreaseType)> = Vec::new();
@@ -288,11 +320,18 @@ impl CreasePattern {
                 }
             }
         }
+
+        // Debug: print constraint edges count
+        platform_log!(
+            "Constraint edges (ALL creases): {}",
+            constraint_edges.len()
+        );
+
         if failed_constraints > 0 {
-            console::warn_1(&format!(
+            platform_warn!(
                 "Crease pattern: {} constraint edge(s) could not be added (unexpected)",
                 failed_constraints
-            ).into());
+            );
         }
 
         // 4. Build vertex index map from handle to our index
@@ -323,6 +362,24 @@ impl CreasePattern {
                 faces.push([i0, i2, i1]);  // CW, flip to make CCW
             }
         }
+
+        // 6. Fix collinear edge issues from spade's CDT
+        let faces = fix_collinear_triangles(&faces, &unique_verts);
+
+        // Debug: print CDT results
+        platform_log!("CDT produced {} triangles (after fix)", faces.len());
+
+        // Count unique edges from faces
+        let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for &[a, b, c] in &faces {
+            let e1 = if a < b { (a, b) } else { (b, a) };
+            let e2 = if b < c { (b, c) } else { (c, b) };
+            let e3 = if a < c { (a, c) } else { (c, a) };
+            edge_set.insert(e1);
+            edge_set.insert(e2);
+            edge_set.insert(e3);
+        }
+        platform_log!("Total edges in mesh: {}", edge_set.len());
 
         // Convert positions to f32 with z=0
         let positions: Vec<[f32; 3]> = unique_verts
@@ -370,8 +427,63 @@ impl CreasePattern {
             }
         }
 
-        (positions, faces, fold_edges, crease_chains)
+        (positions, faces, fold_edges, crease_chains, split_creases)
     }
+}
+
+/// Find all pairs of consecutive collinear vertices that need constraint edges.
+/// For each crease segment, finds all mesh vertices that lie on it, sorts them
+/// by position along the segment, and returns consecutive pairs.
+fn find_collinear_constraints(
+    verts: &[[f64; 2]],
+    creases: &[([f64; 2], [f64; 2], CreaseType)],
+    snap_eps: f64,
+) -> Vec<(usize, usize)> {
+    let mut result: Vec<(usize, usize)> = Vec::new();
+    let mut added: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let collinear_tol = 1e-6;
+
+    for &(c1, c2, _) in creases {
+        let dx = c2[0] - c1[0];
+        let dy = c2[1] - c1[1];
+        let len_sq = dx * dx + dy * dy;
+        if len_sq < 1e-12 { continue; }
+        let len = len_sq.sqrt();
+
+        // Find all vertices on this crease line segment
+        let mut on_line: Vec<(usize, f64)> = Vec::new();
+        for (vi, &v) in verts.iter().enumerate() {
+            let dist = point_to_line_distance(v, c1, c2);
+            if dist < collinear_tol {
+                // Project onto line to get t parameter
+                let t = ((v[0] - c1[0]) * dx + (v[1] - c1[1]) * dy) / len_sq;
+                // Include vertices slightly outside segment bounds (for endpoint tolerance)
+                if t >= -snap_eps / len && t <= 1.0 + snap_eps / len {
+                    on_line.push((vi, t));
+                }
+            }
+        }
+
+        if on_line.len() < 2 { continue; }
+
+        // Sort by t parameter
+        on_line.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        // Add constraints between consecutive vertices
+        for w in on_line.windows(2) {
+            let a = w[0].0;
+            let b = w[1].0;
+            if a != b {
+                let key = if a < b { (a, b) } else { (b, a) };
+                if !added.contains(&key) {
+                    added.insert(key);
+                    result.push(key);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Intersection of two line segments. Returns (t, u) parameters if they intersect
@@ -397,17 +509,20 @@ fn segment_intersection(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2], 
     }
 }
 
-/// Split a set of crease segments at all mutual intersection points.
-/// Returns new segments where no two cross in their interior.
+/// Split a set of crease segments at all mutual intersection points
+/// AND at points where collinear segments overlap.
+/// Returns new segments where no two cross or overlap in their interior.
 fn split_creases_at_intersections(creases: &[([f64; 2], [f64; 2], CreaseType)]) -> Vec<([f64; 2], [f64; 2], CreaseType)> {
     let n = creases.len();
     let eps = 1e-9;
+    let collinear_tol = 1e-6;
 
     // For each crease, collect t-parameters where it is split
     let mut splits: Vec<Vec<f64>> = vec![Vec::new(); n];
 
     for i in 0..n {
         for j in (i + 1)..n {
+            // First check for crossing intersection
             if let Some((t, u)) = segment_intersection(
                 creases[i].0, creases[i].1,
                 creases[j].0, creases[j].1,
@@ -415,6 +530,50 @@ fn split_creases_at_intersections(creases: &[([f64; 2], [f64; 2], CreaseType)]) 
             ) {
                 splits[i].push(t);
                 splits[j].push(u);
+            } else {
+                // Check for collinear overlap
+                let (a1, a2, _) = creases[i];
+                let (b1, b2, _) = creases[j];
+
+                // Check if all 4 points are collinear
+                let dist_b1 = point_to_line_distance(b1, a1, a2);
+                let dist_b2 = point_to_line_distance(b2, a1, a2);
+
+                if dist_b1 < collinear_tol && dist_b2 < collinear_tol {
+                    // Segments are collinear - project all points onto segment i's line
+                    let dx = a2[0] - a1[0];
+                    let dy = a2[1] - a1[1];
+                    let len_sq = dx * dx + dy * dy;
+                    if len_sq < 1e-12 { continue; }
+
+                    // Project b1 and b2 onto segment i's parameterization
+                    let t_b1 = ((b1[0] - a1[0]) * dx + (b1[1] - a1[1]) * dy) / len_sq;
+                    let t_b2 = ((b2[0] - a1[0]) * dx + (b2[1] - a1[1]) * dy) / len_sq;
+
+                    // Add split points where b1/b2 fall inside segment i (0,1)
+                    if t_b1 > eps && t_b1 < 1.0 - eps {
+                        splits[i].push(t_b1);
+                    }
+                    if t_b2 > eps && t_b2 < 1.0 - eps {
+                        splits[i].push(t_b2);
+                    }
+
+                    // Now do the reverse: project a1/a2 onto segment j's parameterization
+                    let dx_j = b2[0] - b1[0];
+                    let dy_j = b2[1] - b1[1];
+                    let len_sq_j = dx_j * dx_j + dy_j * dy_j;
+                    if len_sq_j < 1e-12 { continue; }
+
+                    let t_a1 = ((a1[0] - b1[0]) * dx_j + (a1[1] - b1[1]) * dy_j) / len_sq_j;
+                    let t_a2 = ((a2[0] - b1[0]) * dx_j + (a2[1] - b1[1]) * dy_j) / len_sq_j;
+
+                    if t_a1 > eps && t_a1 < 1.0 - eps {
+                        splits[j].push(t_a1);
+                    }
+                    if t_a2 > eps && t_a2 < 1.0 - eps {
+                        splits[j].push(t_a2);
+                    }
+                }
             }
         }
     }
@@ -449,6 +608,248 @@ fn split_creases_at_intersections(creases: &[([f64; 2], [f64; 2], CreaseType)]) 
     }
 
     result
+}
+
+/// Check if two line segments are collinear and overlapping (not just touching at endpoints).
+/// Returns true if the segments overlap in their interior.
+fn segments_overlap(
+    a1: [f64; 2], a2: [f64; 2],
+    b1: [f64; 2], b2: [f64; 2],
+    tolerance: f64,
+) -> bool {
+    // Check if all 4 points are collinear
+    let dist_b1_to_a = point_to_line_distance(b1, a1, a2);
+    let dist_b2_to_a = point_to_line_distance(b2, a1, a2);
+
+    if dist_b1_to_a > tolerance || dist_b2_to_a > tolerance {
+        return false; // Not collinear
+    }
+
+    // Project all points onto the line direction
+    let dx = a2[0] - a1[0];
+    let dy = a2[1] - a1[1];
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-12 {
+        return false; // Degenerate edge a
+    }
+
+    // Parameter t along line from a1 to a2
+    let t_a1: f64 = 0.0;
+    let t_a2: f64 = 1.0;
+    let t_b1 = ((b1[0] - a1[0]) * dx + (b1[1] - a1[1]) * dy) / len_sq;
+    let t_b2 = ((b2[0] - a1[0]) * dx + (b2[1] - a1[1]) * dy) / len_sq;
+
+    let (t_b_min, t_b_max) = if t_b1 < t_b2 { (t_b1, t_b2) } else { (t_b2, t_b1) };
+
+    // Check for interior overlap (not just touching at endpoints)
+    let overlap_min = t_a1.max(t_b_min);
+    let overlap_max = t_a2.min(t_b_max);
+
+    // They overlap if the overlap region has positive length
+    // Use a small epsilon to ignore endpoint-only touches
+    let eps = 1e-6;
+    overlap_max - overlap_min > eps
+}
+
+/// Distance from point p to infinite line through (a, b).
+fn point_to_line_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-20 {
+        let px = p[0] - a[0];
+        let py = p[1] - a[1];
+        return (px * px + py * py).sqrt();
+    }
+    // Perpendicular distance = |cross product| / |line direction|
+    let cross = (p[0] - a[0]) * dy - (p[1] - a[1]) * dx;
+    cross.abs() / len_sq.sqrt()
+}
+
+/// Check for duplicate/overlapping edges in the mesh.
+/// Returns a list of edge pairs that overlap.
+pub fn find_overlapping_edges(
+    positions: &[[f32; 3]],
+    edges: &[[u32; 2]],
+    tolerance: f64,
+) -> Vec<([u32; 2], [u32; 2])> {
+    let mut overlaps = Vec::new();
+
+    for i in 0..edges.len() {
+        let [a1, a2] = edges[i];
+        let p_a1 = [positions[a1 as usize][0] as f64, positions[a1 as usize][1] as f64];
+        let p_a2 = [positions[a2 as usize][0] as f64, positions[a2 as usize][1] as f64];
+
+        for j in (i + 1)..edges.len() {
+            let [b1, b2] = edges[j];
+
+            // Skip if edges share a vertex (adjacent edges)
+            if a1 == b1 || a1 == b2 || a2 == b1 || a2 == b2 {
+                continue;
+            }
+
+            let p_b1 = [positions[b1 as usize][0] as f64, positions[b1 as usize][1] as f64];
+            let p_b2 = [positions[b2 as usize][0] as f64, positions[b2 as usize][1] as f64];
+
+            if segments_overlap(p_a1, p_a2, p_b1, p_b2, tolerance) {
+                overlaps.push((edges[i], edges[j]));
+            }
+        }
+    }
+
+    overlaps
+}
+
+/// Check if a mesh edge lies on any crease line.
+/// Returns the CreaseType if the edge lies on a crease, None otherwise.
+/// An edge is considered "on a crease" if both endpoints lie very close to the crease line
+/// and the edge is within the crease segment's extent.
+pub fn edge_on_crease(
+    edge_p1: [f64; 2],
+    edge_p2: [f64; 2],
+    creases: &[([f64; 2], [f64; 2], CreaseType)],
+    tolerance: f64,
+) -> Option<CreaseType> {
+    for &(c1, c2, crease_type) in creases {
+        if crease_type == CreaseType::Boundary {
+            continue;
+        }
+
+        // Check if both edge endpoints lie on the crease line
+        let dist1 = point_to_segment_distance(edge_p1, c1, c2);
+        let dist2 = point_to_segment_distance(edge_p2, c1, c2);
+
+        if dist1 < tolerance && dist2 < tolerance {
+            // Both endpoints are on the crease line segment
+            // Also verify the edge midpoint is on the crease (guards against parallel but offset edges)
+            let mid = [(edge_p1[0] + edge_p2[0]) / 2.0, (edge_p1[1] + edge_p2[1]) / 2.0];
+            let dist_mid = point_to_segment_distance(mid, c1, c2);
+            if dist_mid < tolerance {
+                return Some(crease_type);
+            }
+        }
+    }
+    None
+}
+
+/// Check all mesh edges and return a map of edges that lie on creases.
+/// `positions` should be the 2D positions (or 3D with z=0 for flat mesh).
+/// Returns HashMap<(min_v, max_v), CreaseType> for edges on creases.
+pub fn find_edges_on_creases(
+    positions: &[[f32; 3]],
+    edges: &[[u32; 2]],
+    creases: &[([f64; 2], [f64; 2], CreaseType)],
+    tolerance: f64,
+) -> HashMap<(u32, u32), CreaseType> {
+    let mut result = HashMap::new();
+
+    for &[a, b] in edges {
+        let p1 = [positions[a as usize][0] as f64, positions[a as usize][1] as f64];
+        let p2 = [positions[b as usize][0] as f64, positions[b as usize][1] as f64];
+
+        if let Some(crease_type) = edge_on_crease(p1, p2, creases, tolerance) {
+            let key = if a < b { (a, b) } else { (b, a) };
+            result.insert(key, crease_type);
+        }
+    }
+
+    result
+}
+
+/// Fix triangles that have edges containing intermediate collinear vertices.
+/// Also removes degenerate triangles (where all 3 vertices are collinear).
+fn fix_collinear_triangles(faces: &[[u32; 3]], verts: &[[f64; 2]]) -> Vec<[u32; 3]> {
+    let tol = 1e-6;
+
+    // First, remove degenerate triangles (all 3 vertices collinear)
+    let mut current_faces: Vec<[u32; 3]> = Vec::new();
+    for &[a, b, c] in faces {
+        let pa = verts[a as usize];
+        let pb = verts[b as usize];
+        let pc = verts[c as usize];
+
+        // Check if triangle is degenerate (cross product ≈ 0)
+        let cross = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]);
+        if cross.abs() < 1e-10 {
+            continue; // Skip degenerate triangle
+        }
+        current_faces.push([a, b, c]);
+    }
+
+    // Iterate until no more splits needed
+    loop {
+        let mut new_faces: Vec<[u32; 3]> = Vec::new();
+        let mut any_split = false;
+
+        for &[a, b, c] in &current_faces {
+            let pa = verts[a as usize];
+            let pb = verts[b as usize];
+            let pc = verts[c as usize];
+
+            // Find first vertex inside any edge
+            let mut split_vertex: Option<(u32, u8)> = None;
+
+            for (vi, &v) in verts.iter().enumerate() {
+                let vi = vi as u32;
+                if vi == a || vi == b || vi == c { continue; }
+
+                if vertex_inside_segment(v, pa, pb, tol) {
+                    split_vertex = Some((vi, 0));
+                    break;
+                }
+                if vertex_inside_segment(v, pb, pc, tol) {
+                    split_vertex = Some((vi, 1));
+                    break;
+                }
+                if vertex_inside_segment(v, pc, pa, tol) {
+                    split_vertex = Some((vi, 2));
+                    break;
+                }
+            }
+
+            match split_vertex {
+                None => {
+                    new_faces.push([a, b, c]);
+                }
+                Some((m, edge)) => {
+                    any_split = true;
+                    match edge {
+                        0 => {
+                            new_faces.push([a, m, c]);
+                            new_faces.push([m, b, c]);
+                        }
+                        1 => {
+                            new_faces.push([b, m, a]);
+                            new_faces.push([m, c, a]);
+                        }
+                        _ => {
+                            new_faces.push([c, m, b]);
+                            new_faces.push([m, a, b]);
+                        }
+                    }
+                }
+            }
+        }
+
+        current_faces = new_faces;
+        if !any_split { break; }
+    }
+
+    current_faces
+}
+
+/// Check if vertex v lies strictly inside segment (a, b).
+fn vertex_inside_segment(v: [f64; 2], a: [f64; 2], b: [f64; 2], tol: f64) -> bool {
+    let dist = point_to_line_distance(v, a, b);
+    if dist > tol { return false; }
+
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-12 { return false; }
+
+    let t = ((v[0] - a[0]) * dx + (v[1] - a[1]) * dy) / len_sq;
+    t > tol && t < 1.0 - tol
 }
 
 /// Distance from point p to line segment (a, b).

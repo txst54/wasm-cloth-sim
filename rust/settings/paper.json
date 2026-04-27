@@ -1,0 +1,22 @@
+{
+  "time_step": 0.0005,
+  "constraint_iters": 10,
+  "gravity_enabled": false,
+  "gravity_g": -9.8,
+  "pin_enabled": false,
+  "pin_weight": 1.0,
+  "stretch_enabled": true,
+  "stretch_weight": 1.0,
+  "bending_enabled": true,
+  "bending_weight": 1.0,
+  "pulling_enabled": true,
+  "pulling_weight": 0.1,
+  "pulling_area": 5,
+  "self_collision_enabled": false,
+  "self_collision_threshold": 0.02,
+  "self_collision_recompute_iters": 1,
+  "use_distance_constraints": false,
+  "damping": 0.7,
+  "resolution": 32,
+  "warmup_steps": 1000
+}
