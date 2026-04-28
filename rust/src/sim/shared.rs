@@ -222,11 +222,12 @@ pub(super) fn build_vertex_neighbors(faces: &Faces, num_verts: usize) -> Vec<Has
 /// `[a, b, opp0, opp1]` where `(a, b)` is the shared edge.
 /// Build diamond quads `[a, b, c, d]` for every interior edge.
 ///
-/// Ordering guarantee derived from face winding (assumes CCW faces):
-/// - `c` is the opposite vertex from the triangle where edge goes a→b
-///   (forward traversal), i.e. triangle (a, b, c) is CCW.
-/// - `d` is the opposite vertex from the triangle where edge goes b→a
-///   (backward traversal), i.e. triangle (b, a, d) is CCW.
+/// Ordering guarantee derived from face winding (assumes CCW faces),
+/// matches the Origami Simulator convention `[edge_v1, edge_v2, flap1, flap2]`:
+/// - `c` = flap1 = opposite vertex from the *backward* face whose CCW
+///   traversal walks the edge b→a, i.e. triangle (b, a, c) is CCW.
+/// - `d` = flap2 = opposite vertex from the *forward* face whose CCW
+///   traversal walks the edge a→b, i.e. triangle (a, b, d) is CCW.
 ///
 /// This means for a flat CCW mesh the dihedral angle atan2(sin, cos) of
 /// `(b-a)×(c-a)` vs `(b-a)×(d-a)` is exactly π, and deviations from π
@@ -248,11 +249,11 @@ pub(super) fn build_diamonds(faces: &Faces) -> Vec<[u32; 4]> {
     edge_map.into_iter()
         .filter(|(_, adj)| adj.len() == 2)
         .map(|((a, b), adj)| {
-            // c = opp from forward triangle (edge a→b), d = opp from backward
+            // c = flap1 (backward face, edge b→a), d = flap2 (forward face, edge a→b)
             let (c, d) = if adj[0].1 {
-                (adj[0].0, adj[1].0)
-            } else {
                 (adj[1].0, adj[0].0)
+            } else {
+                (adj[0].0, adj[1].0)
             };
             [a, b, c, d]
         })

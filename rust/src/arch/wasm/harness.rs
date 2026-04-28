@@ -1055,18 +1055,14 @@ pub fn set_paper_fold_speed(rads_per_sec: f64) {
 /// Mountain and valley folds fold in opposite directions.
 #[wasm_bindgen]
 pub fn set_paper_fold_angle(degrees: f64) {
-    let desired_dihedral = degrees as f32 * std::f32::consts::PI / 180.0;
-    // target_angle is the offset from rest_angle (π).
-    // For mountain: goal_dihedral = rest + target, we want goal = desired_dihedral
-    //   so target = desired - π (e.g., 0° → target = -π, 180° → target = 0)
-    // For valley: fold in opposite direction, so target = π - desired
+    let desired_dihedral = degrees as f32;
     PAPER_APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
             for hinge in &mut s.sim.hinges {
                 hinge.target_angle = match hinge.direction {
-                    crate::sim::FoldDirection::Mountain => desired_dihedral - std::f32::consts::PI,
-                    crate::sim::FoldDirection::Valley => std::f32::consts::PI - desired_dihedral,
+                    crate::sim::FoldDirection::Mountain => -desired_dihedral,
+                    crate::sim::FoldDirection::Valley => desired_dihedral,
                 };
             }
         }

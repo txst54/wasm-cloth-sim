@@ -317,7 +317,7 @@ impl PaperSim {
                 let alpha_tilde = h.compliance / (dt * dt);
                 // γ = α̃ β̃ / Δt = (compliance/dt²)(dt²·damping)/dt = compliance·damping/dt
                 let gamma = h.compliance * h.damping / dt;
-                let goal_dihedral = h.rest_angle + h.current_angle;
+                let goal_dihedral = h.current_angle;
 
                 apply_hinge_xpbd(
                     &mut self.core.q, &self.core.q_prev, &self.core.w,
@@ -373,51 +373,59 @@ fn apply_hinge_xpbd(
     gamma:       f32,   // compliance * damping / dt
     lambda:      &mut f32,
 ) {
-    let p1 = row3(q, a); let p2 = row3(q, b);
-    let p3 = row3(q, c); let p4 = row3(q, d);
+    // Doc convention: [a, b] = crease edge (a→b is the "forward" direction),
+    // c = flap1 (backward face, CCW = (b, a, c)), d = flap2 (forward face, CCW = (a, b, d)).
+    let pa = row3(q, a); let pb = row3(q, b);
+    let pc = row3(q, c); let pd = row3(q, d);
 
-    let e = p2 - p1;
-    let e_len = e.norm();
-    if e_len < 1e-8 { return; }
-    let e_hat = e / e_len;
+    let edge = pb - pa;
+    let crease_len = edge.norm();
+    if crease_len < 1e-8 { return; }
+    let e_hat = edge / crease_len;
 
-    let n1 = (p2 - p1).cross(&(p3 - p1));
-    let n2 = (p2 - p1).cross(&(p4 - p1));
-    let n1l = n1.norm(); let n2l = n2.norm();
+    // CCW face normals — both point the same way on a flat mesh, so cos(θ_flat)=+1.
+    let n1_raw = (pa - pb).cross(&(pc - pb));   // face1 = (b, a, c)
+    let n2_raw = (pb - pa).cross(&(pd - pa));   // face2 = (a, b, d)
+    let n1l = n1_raw.norm(); let n2l = n2_raw.norm();
     if n1l < 1e-8 || n2l < 1e-8 { return; }
-    let n1h = n1 / n1l; let n2h = n2 / n2l;
+    let n1 = n1_raw / n1l; let n2 = n2_raw / n2l;
 
-    let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
-    let sin_t = n1h.cross(&n2h).dot(&e_hat);
-    let raw_theta = sin_t.atan2(cos_t);
-    // Shift by π so flat = 0 (matching dihedral_angle convention)
-    let theta = {
-        let shifted = raw_theta + std::f32::consts::PI;
-        (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
-    };
+    let cos_t = n1.dot(&n2).clamp(-1.0, 1.0);
+    let sin_t = n1.cross(&n2).dot(&e_hat);
+    let theta = sin_t.atan2(cos_t);
 
-    // C = θ - goal, already in [-π, π] range
     let c_val = theta - goal_angle;
-    if c_val.abs() < 1e-4 { return; }
+    if c_val.abs() < 1e-5 { return; }
 
-    // Gradients ∂θ/∂pᵢ  (same derivation as PBD bending, Müller 2006 §4)
-    let g_c = (e_len / n1l) * n1h;
-    let g_d = -(e_len / n2l) * n2h;
-    let g_a = -((p3 - p2).dot(&e_hat) / n1l) * n1h
-            + ((p4 - p2).dot(&e_hat) / n2l) * n2h;
-    let g_b =  ((p3 - p1).dot(&e_hat) / n1l) * n1h
-            - ((p4 - p1).dot(&e_hat) / n2l) * n2h;
+    // Moment arms and projection coefficients (matches doc's updateCreaseGeo).
+    let v1 = pc - pa;   // flap1 - edge_v1
+    let v2 = pd - pa;   // flap2 - edge_v1
+    let proj1 = e_hat.dot(&v1);
+    let proj2 = e_hat.dot(&v2);
+    let h1_sq = (v1.norm_squared() - proj1 * proj1).max(0.0);
+    let h2_sq = (v2.norm_squared() - proj2 * proj2).max(0.0);
+    if h1_sq < 1e-12 || h2_sq < 1e-12 { return; }
+    let h1 = h1_sq.sqrt();
+    let h2 = h2_sq.sqrt();
+    let coef1 = proj1 / crease_len;
+    let coef2 = proj2 / crease_len;
+
+    // ∂θ/∂x_i — flap nodes move along their face normal at rate 1/h;
+    // edge nodes are weighted combinations (doc §7).
+    let g_c = n1 / h1;                                                    // ∇flap1
+    let g_d = n2 / h2;                                                    // ∇flap2
+    let g_a = -((1.0 - coef1) / h1) * n1 - ((1.0 - coef2) / h2) * n2;     // ∇edge_v1
+    let g_b = -(coef1 / h1) * n1 - (coef2 / h2) * n2;                     // ∇edge_v2
 
     let wa = w[a]; let wb = w[b]; let wc = w[c]; let wd = w[d];
 
     // Damping term: γ ∇C·(x - x^n)
-    let dx_a = p1 - row3(q_prev, a);
-    let dx_b = p2 - row3(q_prev, b);
-    let dx_c = p3 - row3(q_prev, c);
-    let dx_d = p4 - row3(q_prev, d);
+    let dx_a = pa - row3(q_prev, a);
+    let dx_b = pb - row3(q_prev, b);
+    let dx_c = pc - row3(q_prev, c);
+    let dx_d = pd - row3(q_prev, d);
     let grad_dot_dx = g_a.dot(&dx_a) + g_b.dot(&dx_b) + g_c.dot(&dx_c) + g_d.dot(&dx_d);
 
-    // XPBD denominator includes compliance and damping terms
     let weighted_grads = wa * g_a.norm_squared()
                        + wb * g_b.norm_squared()
                        + wc * g_c.norm_squared()
@@ -506,22 +514,20 @@ fn normalise_edge(a: u32, b: u32) -> (u32, u32) {
 /// Returns 0 for a flat mesh, negative for mountain folds, positive for valley folds.
 /// Range: [-π, π]
 fn dihedral_angle(q: &Positions, a: u32, b: u32, c: u32, d: u32) -> f32 {
-    let p1 = row3(q, a as usize); let p2 = row3(q, b as usize);
-    let p3 = row3(q, c as usize); let p4 = row3(q, d as usize);
-    let e = p2 - p1;
-    let e_len = e.norm();
+    let pa = row3(q, a as usize); let pb = row3(q, b as usize);
+    let pc = row3(q, c as usize); let pd = row3(q, d as usize);
+    let edge = pb - pa;
+    let e_len = edge.norm();
     if e_len < 1e-8 { return 0.0; }
-    let e_hat = e / e_len;
-    let n1 = (p2 - p1).cross(&(p3 - p1));
-    let n2 = (p2 - p1).cross(&(p4 - p1));
-    let n1l = n1.norm(); let n2l = n2.norm();
+    let e_hat = edge / e_len;
+    // Match apply_hinge_xpbd: c = flap1 (backward face), d = flap2 (forward face).
+    let n1_raw = (pa - pb).cross(&(pc - pb));
+    let n2_raw = (pb - pa).cross(&(pd - pa));
+    let n1l = n1_raw.norm(); let n2l = n2_raw.norm();
     if n1l < 1e-8 || n2l < 1e-8 { return 0.0; }
-    let n1h = n1 / n1l; let n2h = n2 / n2l;
-    let cos_t = n1h.dot(&n2h).clamp(-1.0, 1.0);
-    let raw = n1h.cross(&n2h).dot(&e_hat).atan2(cos_t);
-    // Shift by π so flat (raw = ±π) becomes 0, and normalize to [-π, π]
-    let shifted = raw + std::f32::consts::PI;
-    (shifted + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI) - std::f32::consts::PI
+    let n1 = n1_raw / n1l; let n2 = n2_raw / n2l;
+    let cos_t = n1.dot(&n2).clamp(-1.0, 1.0);
+    n1.cross(&n2).dot(&e_hat).atan2(cos_t)
 }
 
 #[inline]

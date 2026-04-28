@@ -65,7 +65,7 @@ function buildPanel() {
 
   panel.appendChild(SliderRow({
     label: 'angle (°)',
-    min: 0, max: 90, step: 1, value: 0,
+    min: 0, max: 180, step: 1, value: 0,
     onChange: v => set_paper_fold_angle(v),
   }))
 
@@ -176,7 +176,7 @@ init().then(async () => {
 
   try {
     // Fetch the crease pattern file
-    const file = 'assets/waterbomb.cp'
+    const file = 'assets/yaccho.cp'
     const cpResponse = await fetch(file)
     if (cpResponse.ok) {
       const cpData = await cpResponse.text()
