@@ -1,7 +1,7 @@
 //! WASM entry points and render loop.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use wasm_bindgen::closure::Closure;
@@ -77,6 +77,8 @@ struct CombinedAppState {
     params:       Rc<RefCell<SimParams>>,
     canvas:       HtmlCanvasElement,
     keys:         [bool; 8],
+    paused:       bool,
+    step_once:    bool,
 }
 
 /// Run cloth and a spinning cube together on the same canvas.
@@ -117,9 +119,9 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
     let template = RigidBodyTemplate::new(cube_verts, cube_faces);
     let body = RigidBodyInstance::new(
         template,
-        na::Vector3::zeros(),                // same origin as cloth
+        na::Vector3::new(-1.2, 0.0, 1.2),   // front-left of camera
         na::Vector3::zeros(),
-        na::Vector3::zeros(),
+        na::Vector3::new(0.4, 0.0, -0.4),   // travels through origin toward back-right
         na::Vector3::new(1.0, 2.0, 0.5),    // initial angular velocity (rad/s)
         1000.0,
     );
@@ -146,6 +148,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         cloth_sim, rigid_sim, rigid_params,
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(), keys: [false; 8],
+        paused: false, step_once: false,
     }));
     COMBINED_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -250,9 +253,17 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
 
     let state_kd = state.clone();
     let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
-        if let Some(idx) = arrow_key_index(&e.key()) {
+        let key = e.key();
+        if let Some(idx) = arrow_key_index(&key) {
             e.prevent_default();
             state_kd.borrow_mut().keys[idx] = true;
+        } else if key == " " {
+            e.prevent_default();
+            let mut s = state_kd.borrow_mut();
+            s.paused = !s.paused;
+        } else if key == "n" || key == "N" {
+            let mut s = state_kd.borrow_mut();
+            if s.paused { s.step_once = true; }
         }
     }));
     window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
@@ -277,7 +288,7 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         let mut s = state_inner.borrow_mut();
         let CombinedAppState {
             cloth_sim, cloth, rigid_sim, rigid_params, cube_cloth,
-            ctx, light, camera, params, keys, ..
+            ctx, light, camera, params, keys, paused, step_once, ..
         } = &mut *s;
 
         const ROT_SPEED: f32 = 0.02;
@@ -295,18 +306,38 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
         if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
 
-        // Step cloth
-        cloth_sim.step(&params.borrow());
-        cloth.sync_from_sim(&cloth_sim.q, ctx);
+        let should_step = !*paused || *step_once;
+        *step_once = false;
 
-        // Step rigid body and push updated world-space vertices to render mesh
-        rigid_sim.step(rigid_params);
-        let world_verts = rigid_sim.bodies[0].world_vertices();
-        for (i, pos) in cube_cloth.positions.iter_mut().enumerate() {
-            let v = world_verts[i];
-            *pos = [v[0], v[1], v[2]];
+        if should_step {
+            // Step rigid body; prev state is saved inside step() before integration.
+            rigid_sim.step(rigid_params);
+            let rigid_prev_verts = rigid_sim.bodies[0].prev_world_vertices();
+            let rigid_curr_verts = rigid_sim.bodies[0].world_vertices();
+
+            // Build swept BVH (prev→curr) and step cloth with CCD-based collision.
+            const CLOTH_RIGID_THRESHOLD: f32 = 0.01;
+            let rigid_faces: &[[u32; 3]] = &rigid_sim.bodies[0].get_template().faces;
+            let rigid_bvh = crate::bvh::Bvh::build_from_verts(
+                &rigid_curr_verts, &rigid_prev_verts, rigid_faces, CLOTH_RIGID_THRESHOLD,
+            );
+            if let Some(ref bvh) = rigid_bvh {
+                cloth_sim.step_with_rigid(
+                    &params.borrow(),
+                    &HashSet::new(),
+                    Some((bvh, &rigid_prev_verts, &rigid_curr_verts, rigid_faces, CLOTH_RIGID_THRESHOLD)),
+                );
+            } else {
+                cloth_sim.step(&params.borrow());
+            }
+            cloth.sync_from_sim(&cloth_sim.q, ctx);
+
+            // Push updated world-space vertices to render mesh.
+            for (i, pos) in cube_cloth.positions.iter_mut().enumerate() {
+                *pos = [rigid_curr_verts[i].x, rigid_curr_verts[i].y, rigid_curr_verts[i].z];
+            }
+            cube_cloth.upload(ctx);
         }
-        cube_cloth.upload(ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
             cloth.render(ctx, &view, light, camera);
