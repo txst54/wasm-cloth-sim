@@ -1396,6 +1396,9 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 
 #[wasm_bindgen] pub fn set_time_step(v: f64)         { PARAMS.with(|p| p.borrow_mut().time_step = v); }
 #[wasm_bindgen] pub fn set_constraint_iters(v: u32)  { PARAMS.with(|p| p.borrow_mut().constraint_iters = v); }
+#[wasm_bindgen] pub fn set_num_substeps(v: u32)       { PARAMS.with(|p| p.borrow_mut().num_substeps = v.max(1)); }
+#[wasm_bindgen] pub fn set_stretch_compliance(v: f64) { PARAMS.with(|p| p.borrow_mut().stretch_compliance = v); }
+#[wasm_bindgen] pub fn set_bend_compliance(v: f64)    { PARAMS.with(|p| p.borrow_mut().bend_compliance = v); }
 #[wasm_bindgen] pub fn set_gravity_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().gravity_enabled = v); }
 #[wasm_bindgen] pub fn set_gravity_g(v: f64)         { PARAMS.with(|p| p.borrow_mut().gravity_g = v); }
 #[wasm_bindgen] pub fn set_pin_enabled(v: bool)      { PARAMS.with(|p| p.borrow_mut().pin_enabled = v); }

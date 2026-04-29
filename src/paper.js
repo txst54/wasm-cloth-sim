@@ -9,12 +9,15 @@ import init, {
   set_paper_resolution,
   set_time_step,
   set_constraint_iters,
+  set_num_substeps,
   set_gravity_enabled,
   set_gravity_g,
   set_stretch_enabled,
   set_stretch_weight,
+  set_stretch_compliance,
   set_bending_enabled,
   set_bending_weight,
+  set_bend_compliance,
   set_pulling_enabled,
   set_pulling_weight,
   set_pulling_area,
@@ -23,6 +26,8 @@ import init, {
   set_wireframe_enabled, set_use_distance_constraints,
 } from '../rust/pkg/my_webgpu_app.js'
 import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions } from './components.js'
+
+const USE_DC_DEFAULT = true
 
 function buildPanel() {
   const panel = document.createElement('div')
@@ -105,8 +110,27 @@ function buildPanel() {
   }))
 
   panel.appendChild(SliderRow({
-    label: 'iterations', min: 1, max: 30, step: 1, value: 10,
+    label: 'iterations', min: 1, max: 30, step: 1, value: 1,
     onChange: v => set_constraint_iters(Math.round(v)),
+  }))
+
+  const substepRow = SliderRow({
+    label: 'substeps', min: 1, max: 40, step: 1, value: 10,
+    onChange: v => set_num_substeps(Math.round(v)),
+  })
+  panel.appendChild(substepRow)
+
+  panel.appendChild(Divider())
+
+  // distance constraints toggle (paper sim defaults to on)
+  panel.appendChild(CheckboxRow({
+    label: 'distance constraints',
+    checked: USE_DC_DEFAULT,
+    indent: false,
+    onChange: v => {
+      set_use_distance_constraints(v)
+      applyDistanceConstraintsMode(v)
+    },
   }))
 
   panel.appendChild(Divider())
@@ -125,23 +149,55 @@ function buildPanel() {
 
   panel.appendChild(Divider())
 
-  panel.appendChild(ConstraintGroup({
+  // Stretch — stiffness OR compliance
+  const stretchStiffness = ConstraintGroup({
     label: 'stretch',
     enabled: true,
     onToggle: set_stretch_enabled,
     sliders: [
       new SliderOptions({ weight: 1.0, weightLabel: 'weight', onWeightChange: set_stretch_weight }),
     ],
-  }))
+  })
+  const stretchCompliance = ConstraintGroup({
+    label: 'stretch',
+    enabled: true,
+    onToggle: set_stretch_enabled,
+    sliders: [
+      new SliderOptions({
+        weight: 7,
+        weightLabel: 'Compliance (1e-x)',
+        weightMin: 2, weightMax: 10, weightStep: 0.1,
+        onWeightChange: v => set_stretch_compliance(Math.pow(10, -v)),
+      }),
+    ],
+  })
+  panel.appendChild(stretchStiffness)
+  panel.appendChild(stretchCompliance)
 
-  panel.appendChild(ConstraintGroup({
+  // Bending — stiffness OR compliance
+  const bendStiffness = ConstraintGroup({
     label: 'bending',
     enabled: true,
     onToggle: set_bending_enabled,
     sliders: [
       new SliderOptions({ weight: 1.0, weightLabel: 'weight', onWeightChange: set_bending_weight }),
     ],
-  }))
+  })
+  const bendCompliance = ConstraintGroup({
+    label: 'bending',
+    enabled: true,
+    onToggle: set_bending_enabled,
+    sliders: [
+      new SliderOptions({
+        weight: 6,
+        weightLabel: 'Compliance (1e-x)',
+        weightMin: 2, weightMax: 10, weightStep: 0.1,
+        onWeightChange: v => set_bend_compliance(Math.pow(10, -v)),
+      }),
+    ],
+  })
+  panel.appendChild(bendStiffness)
+  panel.appendChild(bendCompliance)
 
   panel.appendChild(ConstraintGroup({
     label: 'pulling',
@@ -160,23 +216,36 @@ function buildPanel() {
   }))
 
   document.body.appendChild(panel)
+
+  function applyDistanceConstraintsMode(on) {
+    stretchStiffness.style.display = on ? 'none' : ''
+    bendStiffness.style.display    = on ? 'none' : ''
+    stretchCompliance.style.display = on ? '' : 'none'
+    bendCompliance.style.display    = on ? '' : 'none'
+    substepRow.style.display        = on ? '' : 'none'
+  }
+  applyDistanceConstraintsMode(USE_DC_DEFAULT)
 }
 
 init().then(async () => {
   // Paper sim defaults
   set_gravity_enabled(false)
   set_self_collision_enabled(false)
-  // set_use_distance_constraints(true)
+  set_use_distance_constraints(true)
   set_bending_enabled(true)
   set_stretch_weight(1.0)
   set_bending_weight(1.0)
-  set_constraint_iters(10)
-  set_time_step(0.0005)
+  set_paper_hinge_compliance(1e-6)
+  set_stretch_compliance(1e-10)
+  set_bend_compliance(1e-10)
+  set_constraint_iters(1)
+  set_num_substeps(50)
+  set_time_step(0.005)
   set_damping(0.7)
 
   try {
     // Fetch the crease pattern file
-    const file = 'assets/yaccho.cp'
+    const file = 'assets/miura_ori.cp'
     const cpResponse = await fetch(file)
     if (cpResponse.ok) {
       const cpData = await cpResponse.text()

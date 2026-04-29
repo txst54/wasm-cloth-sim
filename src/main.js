@@ -3,14 +3,17 @@ import init, {
   run,
   set_time_step,
   set_constraint_iters,
+  set_num_substeps,
   set_gravity_enabled,
   set_gravity_g,
   set_pin_enabled,
   set_pin_weight,
   set_stretch_enabled,
   set_stretch_weight,
+  set_stretch_compliance,
   set_bending_enabled,
   set_bending_weight,
+  set_bend_compliance,
   set_pulling_enabled,
   set_pulling_weight,
   set_self_collision_enabled,
@@ -23,6 +26,8 @@ import init, {
     run_cloth,
 } from '../rust/pkg/my_webgpu_app.js'
 import {SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions} from './components.js'
+
+const USE_DC_DEFAULT = true
 
 function buildPanel() {
   const panel = document.createElement('div');
@@ -42,6 +47,13 @@ function buildPanel() {
     label: 'iterations', min: 1, max: 30, step: 1, value: 5,
     onChange: v => set_constraint_iters(Math.round(v)),
   }));
+
+  // Substeps slider — only meaningful when distance constraints are on.
+  const substepRow = SliderRow({
+    label: 'substeps', min: 1, max: 40, step: 1, value: 10,
+    onChange: v => set_num_substeps(Math.round(v)),
+  })
+  panel.appendChild(substepRow)
 
   panel.appendChild(Divider());
 
@@ -65,9 +77,12 @@ function buildPanel() {
 
   panel.appendChild(CheckboxRow({
     label: 'distance constraints',
-    checked: false,
+    checked: USE_DC_DEFAULT,
     indent: false,
-    onChange: set_use_distance_constraints,
+    onChange: v => {
+      set_use_distance_constraints(v)
+      applyDistanceConstraintsMode(v)
+    },
   }));
 
   panel.appendChild(Divider());
@@ -85,7 +100,8 @@ function buildPanel() {
     ],
   }));
 
-  panel.appendChild(ConstraintGroup({
+  // Stretch — stiffness OR compliance group, mutually exclusive
+  const stretchStiffness = ConstraintGroup({
     label: 'stretch',
     enabled: true,
     onToggle: set_stretch_enabled,
@@ -96,9 +112,25 @@ function buildPanel() {
         onWeightChange: set_stretch_weight,
       }),
     ],
-  }));
+  })
+  const stretchCompliance = ConstraintGroup({
+    label: 'stretch',
+    enabled: true,
+    onToggle: set_stretch_enabled,
+    sliders: [
+      new SliderOptions({
+        weight: 7,
+        weightLabel: 'Compliance (1e-x)',
+        weightMin: 2, weightMax: 10, weightStep: 0.1,
+        onWeightChange: v => set_stretch_compliance(Math.pow(10, -v)),
+      }),
+    ],
+  })
+  panel.appendChild(stretchStiffness)
+  panel.appendChild(stretchCompliance)
 
-  panel.appendChild(ConstraintGroup({
+  // Bending — stiffness OR compliance group
+  const bendStiffness = ConstraintGroup({
     label: 'bending',
     enabled: true,
     onToggle: set_bending_enabled,
@@ -109,7 +141,22 @@ function buildPanel() {
         onWeightChange: set_bending_weight,
       }),
     ],
-  }));
+  })
+  const bendCompliance = ConstraintGroup({
+    label: 'bending',
+    enabled: true,
+    onToggle: set_bending_enabled,
+    sliders: [
+      new SliderOptions({
+        weight: 6,
+        weightLabel: 'Compliance (1e-x)',
+        weightMin: 2, weightMax: 10, weightStep: 0.1,
+        onWeightChange: v => set_bend_compliance(Math.pow(10, -v)),
+      }),
+    ],
+  })
+  panel.appendChild(bendStiffness)
+  panel.appendChild(bendCompliance)
 
   panel.appendChild(ConstraintGroup({
     label: 'pulling',
@@ -167,9 +214,20 @@ function buildPanel() {
   }));
 
   document.body.appendChild(panel);
+
+  function applyDistanceConstraintsMode(on) {
+    stretchStiffness.style.display = on ? 'none' : ''
+    bendStiffness.style.display    = on ? 'none' : ''
+    stretchCompliance.style.display = on ? '' : 'none'
+    bendCompliance.style.display    = on ? '' : 'none'
+    substepRow.style.display        = on ? '' : 'none'
+  }
+  applyDistanceConstraintsMode(USE_DC_DEFAULT)
 }
 
 init().then(async () => {
+  set_use_distance_constraints(true);
+
   try {
     await run('canvas')
   } catch (e) {

@@ -291,7 +291,7 @@ impl PaperSim {
         let dt = params.time_step as f32;
         let max_delta = self.fold_speed * dt;
 
-        // Rate-limit each hinge toward its target
+        // Rate-limit each hinge toward its target (per-frame, total advance unchanged)
         for h in self.hinges.iter_mut() {
             let delta = (h.target_angle - h.current_angle).clamp(-max_delta, max_delta);
             h.current_angle += delta;
@@ -299,54 +299,68 @@ impl PaperSim {
 
         let skip: HashSet<usize> = self.hinges.iter().map(|h| h.diamond_idx).collect();
 
-        // 1. Predict
-        self.core.predict(params);
+        // Substepping is XPBD-only.
+        let n_sub = if params.use_distance_constraints {
+            params.num_substeps.max(1)
+        } else {
+            1
+        };
+        let sub_params = if n_sub > 1 {
+            let mut p = params.clone();
+            p.time_step = params.time_step / n_sub as f64;
+            p
+        } else {
+            params.clone()
+        };
+        let sub_dt = sub_params.time_step as f32;
+        let cb_alpha_tilde = self.crease_bend_compliance / (sub_dt * sub_dt);
 
-        // 2. Reset all lambdas
-        self.core.reset_lambdas();
-        for h in &mut self.hinges { h.lambda = 0.0; }
-        for cb in &mut self.crease_bends { cb.lambda = 0.0; }
+        for _ in 0..n_sub {
+            // 1. Predict
+            self.core.predict(&sub_params);
 
-        // 3. Unified XPBD iteration loop
-        let cb_alpha_tilde = self.crease_bend_compliance / (dt * dt);
-        for _ in 0..params.constraint_iters {
-            self.core.solve_stretch(params);
-            self.core.solve_bend(params, &skip);
-            self.core.solve_pins(params);
-            self.core.solve_pulling(params);
+            // 2. Reset all lambdas (per-substep)
+            self.core.reset_lambdas();
+            for h in &mut self.hinges { h.lambda = 0.0; }
+            for cb in &mut self.crease_bends { cb.lambda = 0.0; }
 
-            // Hinge dihedral constraints with XPBD damping
-            for h in &mut self.hinges {
-                let [a, b, c, d] = self.core.diamonds[h.diamond_idx];
-                let alpha_tilde = h.compliance / (dt * dt);
-                // γ = α̃ β̃ / Δt = (compliance/dt²)(dt²·damping)/dt = compliance·damping/dt
-                let gamma = h.compliance * h.damping / dt;
-                let goal_dihedral = h.current_angle;
+            // 3. Unified XPBD iteration loop
+            for _ in 0..sub_params.constraint_iters {
+                self.core.solve_stretch(&sub_params);
+                self.core.solve_bend(&sub_params, &skip);
+                self.core.solve_pins(&sub_params);
+                self.core.solve_pulling(&sub_params);
 
-                apply_hinge_xpbd(
-                    &mut self.core.q, &self.core.q_prev, &self.core.w,
-                    a as usize, b as usize, c as usize, d as usize,
-                    goal_dihedral, alpha_tilde, gamma, &mut h.lambda,
-                );
+                // Hinge dihedral constraints with XPBD damping
+                for h in &mut self.hinges {
+                    let [a, b, c, d] = self.core.diamonds[h.diamond_idx];
+                    let alpha_tilde = h.compliance / (sub_dt * sub_dt);
+                    let gamma = h.compliance * h.damping / sub_dt;
+                    let goal_dihedral = h.current_angle;
+
+                    apply_hinge_xpbd(
+                        &mut self.core.q, &self.core.q_prev, &self.core.w,
+                        a as usize, b as usize, c as usize, d as usize,
+                        goal_dihedral, alpha_tilde, gamma, &mut h.lambda,
+                    );
+                }
+
+                // // Crease-bend constraints (keep crease lines straight)
+                // for cb in &mut self.crease_bends {
+                //     apply_crease_bend_xpbd(
+                //         &mut self.core.q, &self.core.w,
+                //         cb.a as usize, cb.b as usize, cb.c as usize,
+                //         cb_alpha_tilde, &mut cb.lambda,
+                //     );
+                // }
             }
 
-            // // Crease-bend constraints (keep crease lines straight)
-            // for cb in &mut self.crease_bends {
-            //     apply_crease_bend_xpbd(
-            //         &mut self.core.q, &self.core.w,
-            //         cb.a as usize, cb.b as usize, cb.c as usize,
-            //         cb_alpha_tilde, &mut cb.lambda,
-            //     );
-            // }
+            self.core.solve_self_collision(&sub_params);
+
+            // 5. Derive velocity from position change
+            self.core.update_velocity(&sub_params);
         }
-
-        self.core.solve_self_collision(params);
-
-        // 4. Remove rigid-body rotation from constraint corrections
-        // self.core.remove_rigid_rotation();
-
-        // 5. Derive velocity from position change
-        self.core.update_velocity(params);
+        let _ = cb_alpha_tilde;
     }
 
 }

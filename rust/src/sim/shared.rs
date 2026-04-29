@@ -962,7 +962,11 @@ impl ClothSimCore {
     pub fn solve_stretch(&mut self, params: &SimParams) {
         if !params.stretch_enabled { return; }
         let dt = params.time_step as f32;
-        let alpha_tilde = stretch_compliance_from_weight(params.stretch_weight as f32) / (dt * dt);
+        let alpha_tilde = if params.use_distance_constraints {
+            params.stretch_compliance as f32 / (dt * dt)
+        } else {
+            stretch_compliance_from_weight(params.stretch_weight as f32) / (dt * dt)
+        };
         if params.use_distance_constraints {
             for ei in 0..self.edges.len() {
                 let [a,b] = self.edges[ei];
@@ -986,7 +990,11 @@ impl ClothSimCore {
     pub fn solve_bend(&mut self, params: &SimParams, skip: &HashSet<usize>) {
         if !params.bending_enabled { return; }
         let dt = params.time_step as f32;
-        let alpha_tilde = bend_compliance_from_weight(params.bending_weight as f32) / (dt * dt);
+        let alpha_tilde = if params.use_distance_constraints {
+            params.bend_compliance as f32 / (dt * dt)
+        } else {
+            bend_compliance_from_weight(params.bending_weight as f32) / (dt * dt)
+        };
         if params.use_distance_constraints {
             for di in 0..self.diamonds.len() {
                 if skip.contains(&di) { continue; }
@@ -1371,28 +1379,47 @@ impl ClothSimCore {
         skip_bending: &HashSet<usize>,
         rigid: Option<(&'a Bvh, &'a [na::Vector3<f32>], &'a [na::Vector3<f32>], &'a [[u32; 3]], f32)>,
     ) {
-        self.predict(params);
-        self.reset_lambdas();
-        let ratio = params.self_collision_recompute_iters as f32 / params.constraint_iters as f32;
-        let mut accumulated = 0.0f32;
-        let mut collisions_run = 0u32;
+        // Substepping is only enabled in the XPBD distance-constraint path.
+        // The shape-matching branch is per-iteration stiffness coupled and
+        // would over-stiffen if substepped.
+        let n_sub = if params.use_distance_constraints {
+            params.num_substeps.max(1)
+        } else {
+            1
+        };
+        let sub_params = if n_sub > 1 {
+            let mut p = params.clone();
+            p.time_step = params.time_step / n_sub as f64;
+            p
+        } else {
+            params.clone()
+        };
 
-        for _ in 0..params.constraint_iters {
-            self.solve_stretch(params);
-            self.solve_bend(params, skip_bending);
-            self.solve_pins(params);
-            self.solve_pulling(params);
-            if let Some((bvh, prev_verts, curr_verts, faces, threshold)) = rigid {
-                self.solve_rigid_body_collision(bvh, prev_verts, curr_verts, faces, threshold);
+        let ratio = sub_params.self_collision_recompute_iters as f32 / sub_params.constraint_iters.max(1) as f32;
+
+        for _ in 0..n_sub {
+            self.predict(&sub_params);
+            self.reset_lambdas();
+            let mut accumulated = 0.0f32;
+            let mut collisions_run = 0u32;
+
+            for _ in 0..sub_params.constraint_iters {
+                self.solve_stretch(&sub_params);
+                self.solve_bend(&sub_params, skip_bending);
+                self.solve_pins(&sub_params);
+                self.solve_pulling(&sub_params);
+                if let Some((bvh, prev_verts, curr_verts, faces, threshold)) = rigid {
+                    self.solve_rigid_body_collision(bvh, prev_verts, curr_verts, faces, threshold);
+                }
+                accumulated += ratio;
+                while accumulated > (collisions_run + 1) as f32 {
+                    self.solve_self_collision(&sub_params);
+                    collisions_run += 1;
+                }
             }
-            accumulated += ratio;
-            while accumulated > (collisions_run + 1) as f32 {
-                self.solve_self_collision(params);
-                collisions_run += 1;
-            }
+            self.solve_self_collision(&sub_params);
+            self.update_velocity(&sub_params);
         }
-        self.solve_self_collision(params);
-        self.update_velocity(params);
     }
 
     /// Resolve cloth-rigid body collisions using CCD vertex-triangle tests.

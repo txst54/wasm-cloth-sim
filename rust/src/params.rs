@@ -4,6 +4,11 @@
 pub struct SimParams {
     pub time_step:         f64,
     pub constraint_iters:  u32,
+    /// Number of XPBD substeps per frame.
+    /// Only applied when `use_distance_constraints = true`.
+    /// Each substep advances the simulation by `time_step / num_substeps`,
+    /// runs `predict → reset λ → constraint_iters → update_velocity`.
+    pub num_substeps:      u32,
 
     pub gravity_enabled:   bool,
     pub gravity_g:         f64,
@@ -13,9 +18,16 @@ pub struct SimParams {
 
     pub stretch_enabled:   bool,
     pub stretch_weight:    f64,
+    /// XPBD compliance α (m²/N) for distance-constraint stretch.
+    /// Used only when `use_distance_constraints = true`.
+    /// Smaller = stiffer. Typical 1e-8 (rigid) … 1e-4 (soft).
+    pub stretch_compliance: f64,
 
     pub bending_enabled:   bool,
     pub bending_weight:    f64,
+    /// XPBD compliance α for distance-constraint bending (diamond diagonals).
+    /// Used only when `use_distance_constraints = true`.
+    pub bend_compliance:    f64,
 
     pub pulling_enabled:   bool,
     pub pulling_weight:    f64,
@@ -43,6 +55,7 @@ impl Default for SimParams {
         Self {
             time_step:        1e-2,
             constraint_iters: 5,
+            num_substeps:     10,
 
             gravity_enabled:  true,
             gravity_g:        -9.8,
@@ -52,9 +65,11 @@ impl Default for SimParams {
 
             stretch_enabled:  true,
             stretch_weight:   0.5,
+            stretch_compliance: 1e-7,
 
             bending_enabled:  true,
             bending_weight:   0.5,
+            bend_compliance:    1e-6,
 
             pulling_enabled:  true,
             pulling_weight:   0.1,
