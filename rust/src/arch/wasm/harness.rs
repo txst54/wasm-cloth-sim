@@ -18,7 +18,7 @@ use super::gpu::GpuContext;
 use super::light::Light;
 use crate::params::SimParams;
 use crate::rigid_body::{RigidBodyInstance, RigidBodyTemplate};
-use crate::sim::{ClothSim, CreasePattern, CreaseType, FoldDirection, FoldSpec, PaperSim, RigidSimCore, RigidSimParams};
+use crate::sim::{ClothSim, CreasePattern, CreaseType, FoldDirection, FoldSpec, PaperSim, ParticleClothSim, RigidSimCore, RigidSimParams, SdfObstacle};
 
 thread_local! {
     static PARAMS: Rc<RefCell<SimParams>> = Rc::new(RefCell::new(SimParams::default()));
@@ -26,6 +26,7 @@ thread_local! {
     static PAPER_APP_STATE: RefCell<Option<Rc<RefCell<PaperAppState>>>> = RefCell::new(None);
     static RIGID_APP_STATE: RefCell<Option<Rc<RefCell<RigidAppState>>>> = RefCell::new(None);
     static COMBINED_APP_STATE: RefCell<Option<Rc<RefCell<CombinedAppState>>>> = RefCell::new(None);
+    static PARTICLE_APP_STATE: RefCell<Option<Rc<RefCell<ParticleAppState>>>> = RefCell::new(None);
 }
 
 struct AppState {
@@ -63,6 +64,21 @@ struct RigidAppState {
     params: RigidSimParams,
     canvas: HtmlCanvasElement,
     keys:   [bool; 8],
+}
+
+struct ParticleAppState {
+    ctx:        GpuContext,
+    cloth:      Cloth,
+    light:      Light,
+    camera:     Camera,
+    sim:        ParticleClothSim,
+    sphere_cloth: Option<Cloth>,
+    params:     Rc<RefCell<SimParams>>,
+    canvas:     HtmlCanvasElement,
+    keys:       [bool; 8],
+    resolution: usize,
+    sphere_center: [f32; 3],
+    sphere_radius: f32,
 }
 
 struct CombinedAppState {
@@ -1438,4 +1454,251 @@ fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
     let len = (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();
     if len > 1e-8 { [v[0]/len, v[1]/len, v[2]/len] } else { v }
+}
+
+// ── Particle cloth + SDF sim ─────────────────────────────────────────────────
+
+fn octa_sphere_mesh(center: [f32; 3], radius: f32) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    let r = radius;
+    let verts = vec![
+        [center[0] + r, center[1], center[2]],
+        [center[0] - r, center[1], center[2]],
+        [center[0], center[1] + r, center[2]],
+        [center[0], center[1] - r, center[2]],
+        [center[0], center[1], center[2] + r],
+        [center[0], center[1], center[2] - r],
+    ];
+    let faces = vec![
+        [0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4],
+        [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5],
+    ];
+    (verts, faces)
+}
+
+#[wasm_bindgen]
+pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    init_platform();
+    let window = web_sys::window().unwrap();
+    let canvas = window.document().unwrap()
+        .get_element_by_id(canvas_id).unwrap()
+        .dyn_into::<HtmlCanvasElement>().unwrap();
+
+    let ctx    = GpuContext::new(canvas.clone()).await?;
+    let light  = Light::new(&ctx, [2.0, 0.0, 0.5]);
+    let camera = Camera::new(&ctx);
+
+    let resolution = 32usize;
+    let cloth      = Cloth::new(&ctx, resolution as u32, &light);
+    let mut sim    = ParticleClothSim::from_grid(resolution, &[0]);
+
+    // Default sphere obstacle below the cloth.
+    let sphere_center = [0.0f32, 0.0, 0.0];
+    let sphere_radius = 0.4f32;
+    sim.add_obstacle(SdfObstacle::sphere(
+        na::Vector3::new(sphere_center[0], sphere_center[1], sphere_center[2]),
+        sphere_radius,
+    ));
+    sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
+
+    // Visualize the sphere with an octahedron mesh.
+    let (sv, sf) = octa_sphere_mesh(sphere_center, sphere_radius);
+    let sphere_cloth = Cloth::from_mesh(
+        &ctx, sv, sf,
+        vec![[0.85, 0.45, 0.30]; 6],
+        HashMap::new(),
+        &light,
+    );
+
+    let fps_div = window.document().unwrap().create_element("div").unwrap();
+    fps_div.set_inner_html("FPS: 0");
+    fps_div.set_attribute("style",
+        "position:fixed; top:10px; left:10px; color:white; font-family:monospace; z-index:1000;"
+    ).unwrap();
+    window.document().unwrap().body().unwrap().append_child(&fps_div).unwrap();
+
+    let state = Rc::new(RefCell::new(ParticleAppState {
+        ctx, cloth, light, camera, sim,
+        sphere_cloth: Some(sphere_cloth),
+        params: PARAMS.with(|p| p.clone()),
+        canvas: canvas.clone(), keys: [false; 8],
+        resolution,
+        sphere_center, sphere_radius,
+    }));
+    PARTICLE_APP_STATE.with(|a| *a.borrow_mut() = Some(state.clone()));
+
+    fn to_ndc(event: &MouseEvent, canvas: &HtmlCanvasElement) -> (f32, f32) {
+        let w = canvas.offset_width()  as f32;
+        let h = canvas.offset_height() as f32;
+        ((event.offset_x() as f32 / w) * 2.0 - 1.0,
+         -(event.offset_y() as f32 / h) * 2.0 + 1.0)
+    }
+
+    let state_md = state.clone();
+    let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_md.borrow_mut();
+        let (nx, ny) = to_ndc(&e, &s.canvas);
+        let mut best_idx = 0usize; let mut best_dist = f32::MAX;
+        for i in 0..s.sim.q.nrows() {
+            let wp = [s.sim.q[(i,0)], s.sim.q[(i,1)], s.sim.q[(i,2)]];
+            let (px, py) = project_to_ndc(wp, &s.camera);
+            let d2 = (px-nx)*(px-nx) + (py-ny)*(py-ny);
+            if d2 < best_dist { best_dist = d2; best_idx = i; }
+        }
+        let vw = [s.sim.q[(best_idx,0)], s.sim.q[(best_idx,1)], s.sim.q[(best_idx,2)]];
+        s.sim.clicked_vertex = Some(best_idx);
+        s.sim.mouse_pos = ray_plane_intersect(nx, ny, vw, &s.camera).unwrap_or(vw);
+    }));
+    canvas.add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())?;
+    mousedown.forget();
+
+    let state_mm = state.clone();
+    let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+        let mut s = state_mm.borrow_mut();
+        if let Some(v) = s.sim.clicked_vertex {
+            let (nx, ny) = to_ndc(&e, &s.canvas);
+            let cp = [s.sim.q[(v,0)], s.sim.q[(v,1)], s.sim.q[(v,2)]];
+            if let Some(world) = ray_plane_intersect(nx, ny, cp, &s.camera) {
+                s.sim.mouse_pos = world;
+            }
+        }
+    }));
+    canvas.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
+    mousemove.forget();
+
+    let state_mu = state.clone();
+    let mouseup = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |_: MouseEvent| {
+        state_mu.borrow_mut().sim.clicked_vertex = None;
+    }));
+    canvas.add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())?;
+    mouseup.forget();
+
+    let state_kd = state.clone();
+    let keydown = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            e.prevent_default();
+            state_kd.borrow_mut().keys[idx] = true;
+        }
+    }));
+    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    keydown.forget();
+
+    let state_ku = state.clone();
+    let keyup = Closure::<dyn FnMut(KeyboardEvent)>::wrap(Box::new(move |e: KeyboardEvent| {
+        if let Some(idx) = arrow_key_index(&e.key()) {
+            state_ku.borrow_mut().keys[idx] = false;
+        }
+    }));
+    window.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+    keyup.forget();
+
+    let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let loop_fn_inner = loop_fn.clone();
+    let state_inner   = state.clone();
+    let last_time = Rc::new(RefCell::new(0.0));
+    let fps = Rc::new(RefCell::new(0.0));
+
+    *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let mut s = state_inner.borrow_mut();
+        let ParticleAppState { sim, cloth, sphere_cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+
+        const ROT_SPEED: f32 = 0.02;
+        const MOV_SPEED: f32 = 0.03;
+        if keys[0] { camera.yaw   -= ROT_SPEED; }
+        if keys[1] { camera.yaw   += ROT_SPEED; }
+        if keys[2] { camera.pitch += ROT_SPEED; }
+        if keys[3] { camera.pitch -= ROT_SPEED; }
+        camera.pitch = camera.pitch.clamp(-1.5, 1.5);
+        let fwd = camera.forward(); let right = camera.right();
+        if keys[4] { for i in 0..3 { camera.target[i] -= right[i] * MOV_SPEED; } }
+        if keys[5] { for i in 0..3 { camera.target[i] += right[i] * MOV_SPEED; } }
+        if keys[6] { for i in 0..3 { camera.target[i] += fwd[i]   * MOV_SPEED; } }
+        if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
+        if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
+
+        sim.step(&params.borrow());
+        cloth.sync_from_sim(&sim.q, ctx);
+
+        if let Ok((frame, view)) = ctx.begin_frame() {
+            cloth.render(ctx, &view, light, camera);
+            if let Some(sc) = sphere_cloth { sc.render_over(ctx, &view, light, camera); }
+            frame.present();
+        }
+
+        let now = web_sys::window().unwrap().performance().unwrap().now();
+        let mut last = last_time.borrow_mut();
+        let dt = now - *last; *last = now;
+        if dt > 0.0 { *fps.borrow_mut() = 1000.0 / dt; }
+        fps_div.set_inner_html(&format!("FPS: {:.1}", *fps.borrow()));
+
+        web_sys::window().unwrap().request_animation_frame(
+            loop_fn_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+        ).unwrap();
+    }) as Box<dyn FnMut()>));
+
+    window.request_animation_frame(
+        loop_fn.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+    )?;
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn set_particle_resolution(v: u32) {
+    PARTICLE_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            let n = v.max(2) as usize;
+            let new_cloth = Cloth::new(&s.ctx, n as u32, &s.light);
+            let mut new_sim = ParticleClothSim::from_grid(n, &[]);
+            new_sim.add_obstacle(SdfObstacle::sphere(
+                na::Vector3::new(s.sphere_center[0], s.sphere_center[1], s.sphere_center[2]),
+                s.sphere_radius,
+            ));
+            new_sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
+            s.cloth = new_cloth;
+            s.sim   = new_sim;
+            s.resolution = n;
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn set_particle_sphere(cx: f32, cy: f32, cz: f32, radius: f32) {
+    PARTICLE_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            s.sphere_center = [cx, cy, cz];
+            s.sphere_radius = radius;
+            // Rebuild obstacle list (sphere + ground plane).
+            s.sim.obstacles.clear();
+            s.sim.add_obstacle(SdfObstacle::sphere(
+                na::Vector3::new(cx, cy, cz), radius,
+            ));
+            s.sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
+            // Rebuild render mesh.
+            let (sv, sf) = octa_sphere_mesh([cx, cy, cz], radius);
+            s.sphere_cloth = Some(Cloth::from_mesh(
+                &s.ctx, sv, sf,
+                vec![[0.85, 0.45, 0.30]; 6],
+                HashMap::new(),
+                &s.light,
+            ));
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn set_particle_radius_scale(scale: f32) {
+    PARTICLE_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            // Recompute average edge length and apply scale.
+            let avg: f32 = if s.sim.edge_rest.is_empty() { 0.05 } else {
+                s.sim.edge_rest.iter().sum::<f32>() / s.sim.edge_rest.len() as f32
+            };
+            let r_val = scale.max(0.0) * avg;
+            for r in s.sim.r.iter_mut() { *r = r_val; }
+            s.sim.r_max = r_val;
+        }
+    });
 }

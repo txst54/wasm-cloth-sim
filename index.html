@@ -12,6 +12,8 @@
     <script type="module">
       if (location.pathname.startsWith('/paper')) {
         import('/src/paper.js')
+      } else if (location.pathname.startsWith('/particle')) {
+        import('/src/particle_cloth.js')
       } else {
         import('/src/main.js')
       }
