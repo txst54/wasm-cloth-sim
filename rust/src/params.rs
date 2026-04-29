@@ -44,6 +44,14 @@ pub struct SimParams {
     /// Velocity damping applied after each step: v *= (1 - damping).
     /// 0.0 = no damping (default); 0.05 = 5% reduction per step.
     pub damping: f64,
+    /// Coulomb friction on contacts (self + SDF) for particle cloth.
+    pub friction_enabled: bool,
+    /// Friction coefficient μ. Tangential Lagrange multiplier is clamped to μ·Δλ_n.
+    pub friction_mu: f64,
+    /// Velocity-averaging damping for cloth-cloth contacts (Stable Cloth-Cloth Friction).
+    pub cloth_friction_enabled: bool,
+    /// Physical damping coefficient d_physical (1/s). Effective d = clamp(h·d_physical, 0, 1).
+    pub cloth_friction_d: f64,
     /// Grid resolution for mesh generation (default 32).
     pub resolution: u32,
     /// Number of warmup steps to run at target_angle=0 before applying the target fold angle.
@@ -80,6 +88,10 @@ impl Default for SimParams {
             self_collision_recompute_iters: 1,
             use_distance_constraints: false,
             damping: 0.0,
+            friction_enabled: true,
+            friction_mu: 0.3,
+            cloth_friction_enabled: true,
+            cloth_friction_d: 30.0,
             resolution: 32,
             warmup_steps: 0,
         }

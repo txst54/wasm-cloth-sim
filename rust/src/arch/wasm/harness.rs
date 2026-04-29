@@ -1432,6 +1432,10 @@ fn unproject(nx: f32, ny: f32, nz: f32, inv_vp: &[[f32; 4]; 4]) -> [f32; 3] {
 #[wasm_bindgen] pub fn set_use_distance_constraints(v: bool)        { PARAMS.with(|p| p.borrow_mut().use_distance_constraints = v); }
 #[wasm_bindgen] pub fn set_pulling_area(v: u32)    { PARAMS.with(|p| p.borrow_mut().pulling_area = v); }
 #[wasm_bindgen] pub fn set_damping(v: f64)         { PARAMS.with(|p| p.borrow_mut().damping = v); }
+#[wasm_bindgen] pub fn set_friction_enabled(v: bool)        { PARAMS.with(|p| p.borrow_mut().friction_enabled = v); }
+#[wasm_bindgen] pub fn set_friction_mu(v: f64)              { PARAMS.with(|p| p.borrow_mut().friction_mu = v); }
+#[wasm_bindgen] pub fn set_cloth_friction_enabled(v: bool)  { PARAMS.with(|p| p.borrow_mut().cloth_friction_enabled = v); }
+#[wasm_bindgen] pub fn set_cloth_friction_d(v: f64)         { PARAMS.with(|p| p.borrow_mut().cloth_friction_d = v); }
 
 #[wasm_bindgen]
 pub fn set_resolution(v: u32) {
@@ -1712,7 +1716,8 @@ pub fn set_particle_resolution(v: u32) {
                 na::Vector3::new(s.sphere_center[0], s.sphere_center[1], s.sphere_center[2]),
                 s.sphere_radius,
             ));
-            new_sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
+            let ground_y = s.sphere_center[1] - s.sphere_radius;
+            new_sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), ground_y));
             s.cloth = new_cloth;
             s.sim   = new_sim;
             s.resolution = n;
