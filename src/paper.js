@@ -25,7 +25,7 @@ import init, {
   set_damping,
   set_wireframe_enabled, set_use_distance_constraints,
 } from '../rust/pkg/my_webgpu_app.js'
-import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions } from './components.js'
+import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions, Button } from './components.js'
 
 const USE_DC_DEFAULT = true
 
@@ -46,6 +46,12 @@ function buildPanel() {
   back.textContent = '← cloth sim'
   panel.appendChild(back)
 
+  let currentResolution = 32
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => set_paper_resolution(Math.round(currentResolution)),
+  }))
+
   // Wireframe toggle
   panel.appendChild(CheckboxRow({
     label: 'show wireframe',
@@ -57,7 +63,7 @@ function buildPanel() {
   panel.appendChild(SliderRow({
     label: 'resolution',
     min: 1, max: 64, step: 1, value: 32,
-    onChange: v => set_paper_resolution(Math.round(v)),
+    onChange: v => { currentResolution = v; set_paper_resolution(Math.round(v)) },
   }))
 
   panel.appendChild(Divider())

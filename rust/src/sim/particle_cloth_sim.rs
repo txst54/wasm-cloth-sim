@@ -29,6 +29,9 @@ use super::traits::MeshSim;
 pub struct ParticleClothSim {
     pub q:        Positions,
     pub q_prev:   Positions,
+    /// Rest (initial) positions, used to compute pairwise rest distance for
+    /// self-contact thresholds (`d_coll = min(2r, d_rest)`).
+    pub q_rest:   Positions,
     pub v:        Positions,
     pub w:        na::DVector<f32>,
     /// Per-particle contact radius.
@@ -69,13 +72,15 @@ impl ParticleClothSim {
             for col in 0..n {
                 let i = row * n + col;
                 let x = (col as f32 / (n - 1) as f32) * 2.0 - 1.0;
-                let y = (row as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let z = (row as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                // Lay the cloth horizontally above the sphere so it drapes under gravity.
                 q[(i, 0)] = x * 0.9;
-                q[(i, 1)] = y * 0.9 + 0.6; // start above origin so it can fall
-                q[(i, 2)] = 0.0;
+                q[(i, 1)] = 1.5;
+                q[(i, 2)] = z * 0.9;
             }
         }
         let q_prev = q.clone();
+        let q_rest = q.clone();
         let v = Positions::zeros(num_verts);
 
         let mut w = na::DVector::from_element(num_verts, 1.0f32);
@@ -124,7 +129,7 @@ impl ParticleClothSim {
         let bend_lambda    = vec![0.0f32; diamonds.len()];
 
         Self {
-            q, q_prev, v, w, r, r_max,
+            q, q_prev, q_rest, v, w, r, r_max,
             faces, edges, edge_rest, diamonds, diamond_rest,
             stretch_lambda, bend_lambda, one_ring,
             hash, obstacles: Vec::new(),
@@ -252,11 +257,19 @@ impl ParticleClothSim {
                 let dx = self.q[(j, 0)] - self.q[(i, 0)];
                 let dy = self.q[(j, 1)] - self.q[(i, 1)];
                 let dz = self.q[(j, 2)] - self.q[(i, 2)];
+                // d_coll = min(2r, d_rest) so contact threshold never exceeds
+                // the pair's rest distance — otherwise distance constraints
+                // and contact constraints fight each other.
                 let r_sum = ri + self.r[j];
+                let rxd = self.q_rest[(j, 0)] - self.q_rest[(i, 0)];
+                let ryd = self.q_rest[(j, 1)] - self.q_rest[(i, 1)];
+                let rzd = self.q_rest[(j, 2)] - self.q_rest[(i, 2)];
+                let d_rest = (rxd * rxd + ryd * ryd + rzd * rzd).sqrt();
+                let d_coll = r_sum.min(d_rest);
                 let d2 = dx * dx + dy * dy + dz * dz;
-                if d2 >= r_sum * r_sum || d2 < 1e-12 { continue; }
+                if d2 >= d_coll * d_coll || d2 < 1e-12 { continue; }
                 let d = d2.sqrt();
-                let c_val = d - r_sum; // < 0
+                let c_val = d - d_coll; // < 0
                 let wi = self.w[i]; let wj = self.w[j];
                 let denom = wi + wj + alpha;
                 if denom < 1e-12 { continue; }

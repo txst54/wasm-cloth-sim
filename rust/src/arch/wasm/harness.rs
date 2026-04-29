@@ -73,6 +73,7 @@ struct ParticleAppState {
     camera:     Camera,
     sim:        ParticleClothSim,
     sphere_cloth: Option<Cloth>,
+    ground_cloth: Option<Cloth>,
     params:     Rc<RefCell<SimParams>>,
     canvas:     HtmlCanvasElement,
     keys:       [bool; 8],
@@ -1459,20 +1460,55 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 // ── Particle cloth + SDF sim ─────────────────────────────────────────────────
 
 fn octa_sphere_mesh(center: [f32; 3], radius: f32) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
-    let r = radius;
-    let verts = vec![
-        [center[0] + r, center[1], center[2]],
-        [center[0] - r, center[1], center[2]],
-        [center[0], center[1] + r, center[2]],
-        [center[0], center[1] - r, center[2]],
-        [center[0], center[1], center[2] + r],
-        [center[0], center[1], center[2] - r],
+    // Start from a unit octahedron, then loop-subdivide and project each new
+    // vertex onto the unit sphere. With `subdiv = 3` we get 8 * 4^3 = 512 faces.
+    let mut verts: Vec<[f32; 3]> = vec![
+        [ 1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
+        [0.0,  1.0, 0.0], [0.0, -1.0, 0.0],
+        [0.0, 0.0,  1.0], [0.0, 0.0, -1.0],
     ];
-    let faces = vec![
+    let mut faces: Vec<[u32; 3]> = vec![
         [0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4],
         [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5],
     ];
-    (verts, faces)
+
+    let subdiv = 3u32;
+    for _ in 0..subdiv {
+        let mut new_faces: Vec<[u32; 3]> = Vec::with_capacity(faces.len() * 4);
+        let mut midpoint_cache: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
+        let mut midpoint = |a: u32, b: u32, verts: &mut Vec<[f32; 3]>| -> u32 {
+            let key = if a < b { (a, b) } else { (b, a) };
+            if let Some(&i) = midpoint_cache.get(&key) { return i; }
+            let pa = verts[a as usize]; let pb = verts[b as usize];
+            let mx = (pa[0] + pb[0]) * 0.5;
+            let my = (pa[1] + pb[1]) * 0.5;
+            let mz = (pa[2] + pb[2]) * 0.5;
+            let inv = 1.0 / (mx*mx + my*my + mz*mz).sqrt();
+            verts.push([mx * inv, my * inv, mz * inv]);
+            let idx = (verts.len() - 1) as u32;
+            midpoint_cache.insert(key, idx);
+            idx
+        };
+        for &[a, b, c] in &faces {
+            let ab = midpoint(a, b, &mut verts);
+            let bc = midpoint(b, c, &mut verts);
+            let ca = midpoint(c, a, &mut verts);
+            new_faces.push([a, ab, ca]);
+            new_faces.push([b, bc, ab]);
+            new_faces.push([c, ca, bc]);
+            new_faces.push([ab, bc, ca]);
+        }
+        faces = new_faces;
+    }
+
+    // Scale to radius and translate to center.
+    let world_verts: Vec<[f32; 3]> = verts.iter().map(|v| [
+        center[0] + v[0] * radius,
+        center[1] + v[1] * radius,
+        center[2] + v[2] * radius,
+    ]).collect();
+    (world_verts, faces)
 }
 
 #[wasm_bindgen]
@@ -1490,25 +1526,45 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
     let resolution = 32usize;
     let cloth      = Cloth::new(&ctx, resolution as u32, &light);
-    let mut sim    = ParticleClothSim::from_grid(resolution, &[0]);
+    let mut sim    = ParticleClothSim::from_grid(resolution, &[]);
 
-    // Default sphere obstacle below the cloth.
+    // Sphere for the cloth to drape over, plus an infinite ground plane below it.
     let sphere_center = [0.0f32, 0.0, 0.0];
     let sphere_radius = 0.4f32;
     sim.add_obstacle(SdfObstacle::sphere(
         na::Vector3::new(sphere_center[0], sphere_center[1], sphere_center[2]),
         sphere_radius,
     ));
-    sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
+    // Ground plane right below the sphere so the sphere sits on it.
+    // SDF: phi = p·n − d. With n=+y, d = sphere_center.y − sphere_radius = −0.4.
+    let ground_y = sphere_center[1] - sphere_radius;
+    sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), ground_y));
 
     // Visualize the sphere with an octahedron mesh.
     let (sv, sf) = octa_sphere_mesh(sphere_center, sphere_radius);
+    let sphere_colors = vec![[0.85, 0.45, 0.30]; sf.len()];
     let sphere_cloth = Cloth::from_mesh(
         &ctx, sv, sf,
-        vec![[0.85, 0.45, 0.30]; 6],
+        sphere_colors,
         HashMap::new(),
         &light,
     );
+
+    // Visualize the ground as a large quad at y = ground_y.
+    let ground_cloth = {
+        let s = 10.0f32;
+        let gv = vec![
+            [-s, ground_y, -s], [ s, ground_y, -s],
+            [ s, ground_y,  s], [-s, ground_y,  s],
+        ];
+        let gf = vec![[0u32, 1, 2], [0, 2, 3]];
+        Cloth::from_mesh(
+            &ctx, gv, gf,
+            vec![[0.30, 0.30, 0.32]; 2],
+            HashMap::new(),
+            &light,
+        )
+    };
 
     let fps_div = window.document().unwrap().create_element("div").unwrap();
     fps_div.set_inner_html("FPS: 0");
@@ -1520,6 +1576,7 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
     let state = Rc::new(RefCell::new(ParticleAppState {
         ctx, cloth, light, camera, sim,
         sphere_cloth: Some(sphere_cloth),
+        ground_cloth: Some(ground_cloth),
         params: PARAMS.with(|p| p.clone()),
         canvas: canvas.clone(), keys: [false; 8],
         resolution,
@@ -1600,7 +1657,7 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
     *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
         let mut s = state_inner.borrow_mut();
-        let ParticleAppState { sim, cloth, sphere_cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+        let ParticleAppState { sim, cloth, sphere_cloth, ground_cloth, ctx, light, camera, params, keys, .. } = &mut *s;
 
         const ROT_SPEED: f32 = 0.02;
         const MOV_SPEED: f32 = 0.03;
@@ -1621,6 +1678,7 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
         if let Ok((frame, view)) = ctx.begin_frame() {
             cloth.render(ctx, &view, light, camera);
+            if let Some(gc) = ground_cloth { gc.render_over(ctx, &view, light, camera); }
             if let Some(sc) = sphere_cloth { sc.render_over(ctx, &view, light, camera); }
             frame.present();
         }
@@ -1674,12 +1732,26 @@ pub fn set_particle_sphere(cx: f32, cy: f32, cz: f32, radius: f32) {
             s.sim.add_obstacle(SdfObstacle::sphere(
                 na::Vector3::new(cx, cy, cz), radius,
             ));
-            s.sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), -1.5));
-            // Rebuild render mesh.
+            let ground_y = cy - radius;
+            s.sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), ground_y));
+            // Rebuild render meshes.
             let (sv, sf) = octa_sphere_mesh([cx, cy, cz], radius);
+            let sphere_colors = vec![[0.85, 0.45, 0.30]; sf.len()];
             s.sphere_cloth = Some(Cloth::from_mesh(
                 &s.ctx, sv, sf,
-                vec![[0.85, 0.45, 0.30]; 6],
+                sphere_colors,
+                HashMap::new(),
+                &s.light,
+            ));
+            let gs = 10.0f32;
+            let gv = vec![
+                [-gs, ground_y, -gs], [ gs, ground_y, -gs],
+                [ gs, ground_y,  gs], [-gs, ground_y,  gs],
+            ];
+            let gf = vec![[0u32, 1, 2], [0, 2, 3]];
+            s.ground_cloth = Some(Cloth::from_mesh(
+                &s.ctx, gv, gf,
+                vec![[0.30, 0.30, 0.32]; 2],
                 HashMap::new(),
                 &s.light,
             ));

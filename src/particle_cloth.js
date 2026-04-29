@@ -18,7 +18,7 @@ import init, {
   set_use_distance_constraints,
   set_damping,
 } from '../rust/pkg/my_webgpu_app.js'
-import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions } from './components.js'
+import { SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions, Button } from './components.js'
 
 function buildPanel() {
   const panel = document.createElement('div')
@@ -36,9 +36,15 @@ function buildPanel() {
   back.textContent = '← cloth sim'
   panel.appendChild(back)
 
+  let currentResolution = 32
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => set_particle_resolution(Math.round(currentResolution)),
+  }))
+
   panel.appendChild(SliderRow({
     label: 'resolution', min: 4, max: 96, step: 1, value: 32,
-    onChange: v => set_particle_resolution(Math.round(v)),
+    onChange: v => { currentResolution = v; set_particle_resolution(Math.round(v)) },
   }))
 
   panel.appendChild(Divider())

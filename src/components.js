@@ -129,6 +129,21 @@ export function Divider() {
   return el('div', 'border-t border-white/10 my-2')
 }
 
+/**
+ * Button — a full-width clickable button.
+ *
+ * Props:
+ *   label    {string}
+ *   onClick  {fn}
+ */
+export function Button({ label, onClick }) {
+  const btn = el('button', 'w-full mb-2 px-2 py-1 bg-white/10 hover:bg-white/20 active:bg-white/30 border border-white/20 rounded text-white/90 cursor-pointer transition-colors')
+  btn.type = 'button'
+  btn.textContent = label
+  btn.addEventListener('click', onClick)
+  return btn
+}
+
 export class SliderOptions {
   constructor({
                 weight,

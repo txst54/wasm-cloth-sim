@@ -25,7 +25,7 @@ import init, {
     run_rigid,
     run_cloth,
 } from '../rust/pkg/my_webgpu_app.js'
-import {SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions} from './components.js'
+import {SliderRow, ConstraintGroup, CheckboxRow, Divider, SliderOptions, Button} from './components.js'
 
 const USE_DC_DEFAULT = true
 
@@ -37,6 +37,12 @@ function buildPanel() {
   title.className = 'text-sm font-bold mb-3 text-white/90 tracking-wide';
   title.textContent = 'Sim Params';
   panel.appendChild(title);
+
+  let currentResolution = 32;
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => set_resolution(Math.round(currentResolution)),
+  }));
 
   panel.appendChild(SliderRow({
     label: 'time step', min: 0.001, max: 0.1, step: 0.001, value: 0.01,
@@ -210,7 +216,7 @@ function buildPanel() {
 
   panel.appendChild(SliderRow({
     label: 'resolution', min: 4, max: 128, step: 1, value: 32,
-    onChange: v => set_resolution(Math.round(v)),
+    onChange: v => { currentResolution = v; set_resolution(Math.round(v)) },
   }));
 
   document.body.appendChild(panel);
