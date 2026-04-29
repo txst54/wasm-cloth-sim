@@ -29,6 +29,9 @@ use super::traits::MeshSim;
 pub struct ParticleClothSim {
     pub q:        Positions,
     pub q_prev:   Positions,
+    /// Predicted positions snapshot (after predict, before constraint solve).
+    /// Used to extract tangential motion for Coulomb friction.
+    pub q_pred:   Positions,
     /// Rest (initial) positions, used to compute pairwise rest distance for
     /// self-contact thresholds (`d_coll = min(2r, d_rest)`).
     pub q_rest:   Positions,
@@ -55,6 +58,10 @@ pub struct ParticleClothSim {
     pub hash:       ParticleHash,
     pub obstacles:  Vec<SdfObstacle>,
 
+    /// Cloth-cloth contact pairs recorded this substep (i < j). Consumed by
+    /// the velocity-averaging damping pass after the velocity update.
+    pub contact_pairs: Vec<(u32, u32)>,
+
     pub clicked_vertex: Option<usize>,
     pub mouse_pos:      [f32; 3],
 
@@ -80,6 +87,7 @@ impl ParticleClothSim {
             }
         }
         let q_prev = q.clone();
+        let q_pred = q.clone();
         let q_rest = q.clone();
         let v = Positions::zeros(num_verts);
 
@@ -129,10 +137,11 @@ impl ParticleClothSim {
         let bend_lambda    = vec![0.0f32; diamonds.len()];
 
         Self {
-            q, q_prev, q_rest, v, w, r, r_max,
+            q, q_prev, q_pred, q_rest, v, w, r, r_max,
             faces, edges, edge_rest, diamonds, diamond_rest,
             stretch_lambda, bend_lambda, one_ring,
             hash, obstacles: Vec::new(),
+            contact_pairs: Vec::new(),
             clicked_vertex: None, mouse_pos: [0.0; 3],
             resolution: n,
         }
@@ -155,6 +164,11 @@ impl ParticleClothSim {
         } else { 1e30 };
         let alpha_c = 0.0f32; // hard contact
 
+        let mu = if params.friction_enabled { params.friction_mu as f32 } else { 0.0 };
+        let cloth_d = if params.cloth_friction_enabled {
+            (h * params.cloth_friction_d as f32).clamp(0.0, 1.0)
+        } else { 0.0 };
+
         let n = self.q.nrows();
 
         for _ in 0..n_sub {
@@ -172,6 +186,10 @@ impl ParticleClothSim {
                 self.q[(i, 1)] += h * self.v[(i, 1)];
                 self.q[(i, 2)] += h * self.v[(i, 2)];
             }
+
+            // Snapshot predicted positions for tangential-friction extraction.
+            self.q_pred.copy_from(&self.q);
+            self.contact_pairs.clear();
 
             for l in self.stretch_lambda.iter_mut() { *l = 0.0; }
             for l in self.bend_lambda.iter_mut()    { *l = 0.0; }
@@ -204,12 +222,12 @@ impl ParticleClothSim {
             if params.self_collision_enabled {
                 self.hash.set_cell_size(2.0 * self.r_max);
                 self.hash.rebuild(&self.q);
-                self.project_self_contact(alpha_c);
+                self.project_self_contact(alpha_c, mu);
             }
 
             // 4) Rigid SDF contact
             if !self.obstacles.is_empty() {
-                self.project_sdf_contact(alpha_c);
+                self.project_sdf_contact(alpha_c, mu);
             }
 
             // 5) Pin constraint via mouse drag (snap clicked vertex to mouse_pos)
@@ -239,10 +257,50 @@ impl ParticleClothSim {
                 self.v[(i, 1)] = (self.q[(i, 1)] - self.q_prev[(i, 1)]) * inv_h;
                 self.v[(i, 2)] = (self.q[(i, 2)] - self.q_prev[(i, 2)]) * inv_h;
             }
+
+            // 7) Stable cloth-cloth friction: velocity-averaging damping over
+            //    contacting pairs. Adjusts both q (so positions stay consistent)
+            //    and v. Pinned (w=0) particles act as infinite-mass anchors.
+            if cloth_d > 0.0 && !self.contact_pairs.is_empty() {
+                for &(iu, ju) in self.contact_pairs.iter() {
+                    let i = iu as usize;
+                    let j = ju as usize;
+                    let wi = self.w[i];
+                    let wj = self.w[j];
+                    if wi == 0.0 && wj == 0.0 { continue; }
+                    let vix = self.v[(i, 0)]; let viy = self.v[(i, 1)]; let viz = self.v[(i, 2)];
+                    let vjx = self.v[(j, 0)]; let vjy = self.v[(j, 1)]; let vjz = self.v[(j, 2)];
+                    let vax = 0.5 * (vix + vjx);
+                    let vay = 0.5 * (viy + vjy);
+                    let vaz = 0.5 * (viz + vjz);
+                    if wi > 0.0 {
+                        let dvx = cloth_d * (vax - vix);
+                        let dvy = cloth_d * (vay - viy);
+                        let dvz = cloth_d * (vaz - viz);
+                        self.q[(i, 0)] += dvx * h;
+                        self.q[(i, 1)] += dvy * h;
+                        self.q[(i, 2)] += dvz * h;
+                        self.v[(i, 0)] += dvx;
+                        self.v[(i, 1)] += dvy;
+                        self.v[(i, 2)] += dvz;
+                    }
+                    if wj > 0.0 {
+                        let dvx = cloth_d * (vax - vjx);
+                        let dvy = cloth_d * (vay - vjy);
+                        let dvz = cloth_d * (vaz - vjz);
+                        self.q[(j, 0)] += dvx * h;
+                        self.q[(j, 1)] += dvy * h;
+                        self.q[(j, 2)] += dvz * h;
+                        self.v[(j, 0)] += dvx;
+                        self.v[(j, 1)] += dvy;
+                        self.v[(j, 2)] += dvz;
+                    }
+                }
+            }
         }
     }
 
-    fn project_self_contact(&mut self, alpha: f32) {
+    fn project_self_contact(&mut self, alpha: f32, mu: f32) {
         let n = self.q.nrows();
         let mut neigh: Vec<u32> = Vec::with_capacity(64);
         for i in 0..n {
@@ -286,17 +344,54 @@ impl ParticleClothSim {
                     self.q[(j, 1)] += wj * dl * ny;
                     self.q[(j, 2)] += wj * dl * nz;
                 }
+
+                self.contact_pairs.push((i as u32, j as u32));
+
+                // Tangential friction (eq. 11–12). dl is Δλ_n (≥ 0 here).
+                if mu > 0.0 {
+                    let dax = (self.q[(i, 0)] - self.q_pred[(i, 0)])
+                            - (self.q[(j, 0)] - self.q_pred[(j, 0)]);
+                    let day = (self.q[(i, 1)] - self.q_pred[(i, 1)])
+                            - (self.q[(j, 1)] - self.q_pred[(j, 1)]);
+                    let daz = (self.q[(i, 2)] - self.q_pred[(i, 2)])
+                            - (self.q[(j, 2)] - self.q_pred[(j, 2)]);
+                    let dn = dax * nx + day * ny + daz * nz;
+                    let tx = dax - dn * nx;
+                    let ty = day - dn * ny;
+                    let tz = daz - dn * nz;
+                    let tlen = (tx * tx + ty * ty + tz * tz).sqrt();
+                    if tlen > 1e-8 {
+                        let denom_f = wi + wj;
+                        if denom_f > 1e-12 {
+                            let mut dlf = tlen / denom_f;
+                            let cap = mu * dl;
+                            if dlf > cap { dlf = cap; }
+                            let inv_t = 1.0 / tlen;
+                            let thx = tx * inv_t; let thy = ty * inv_t; let thz = tz * inv_t;
+                            if wi > 0.0 {
+                                self.q[(i, 0)] -= wi * dlf * thx;
+                                self.q[(i, 1)] -= wi * dlf * thy;
+                                self.q[(i, 2)] -= wi * dlf * thz;
+                            }
+                            if wj > 0.0 {
+                                self.q[(j, 0)] += wj * dlf * thx;
+                                self.q[(j, 1)] += wj * dlf * thy;
+                                self.q[(j, 2)] += wj * dlf * thz;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    fn project_sdf_contact(&mut self, alpha: f32) {
+    fn project_sdf_contact(&mut self, alpha: f32, mu: f32) {
         let n = self.q.nrows();
         for i in 0..n {
             let wi = self.w[i];
             if wi == 0.0 { continue; }
-            let pi = na::Vector3::new(self.q[(i, 0)], self.q[(i, 1)], self.q[(i, 2)]);
             for obs in &self.obstacles {
+                let pi = na::Vector3::new(self.q[(i, 0)], self.q[(i, 1)], self.q[(i, 2)]);
                 let (d, n_world) = obs.query(pi);
                 let phi = d - self.r[i];
                 if phi >= 0.0 { continue; }
@@ -306,6 +401,27 @@ impl ParticleClothSim {
                 self.q[(i, 0)] += wi * dl * n_world.x;
                 self.q[(i, 1)] += wi * dl * n_world.y;
                 self.q[(i, 2)] += wi * dl * n_world.z;
+
+                // Tangential friction against static SDF (v_obstacle = 0).
+                if mu > 0.0 {
+                    let dax = self.q[(i, 0)] - self.q_pred[(i, 0)];
+                    let day = self.q[(i, 1)] - self.q_pred[(i, 1)];
+                    let daz = self.q[(i, 2)] - self.q_pred[(i, 2)];
+                    let dn = dax * n_world.x + day * n_world.y + daz * n_world.z;
+                    let tx = dax - dn * n_world.x;
+                    let ty = day - dn * n_world.y;
+                    let tz = daz - dn * n_world.z;
+                    let tlen = (tx * tx + ty * ty + tz * tz).sqrt();
+                    if tlen > 1e-8 {
+                        let mut dlf = tlen / wi;
+                        let cap = mu * dl;
+                        if dlf > cap { dlf = cap; }
+                        let inv_t = 1.0 / tlen;
+                        self.q[(i, 0)] -= wi * dlf * tx * inv_t;
+                        self.q[(i, 1)] -= wi * dlf * ty * inv_t;
+                        self.q[(i, 2)] -= wi * dlf * tz * inv_t;
+                    }
+                }
             }
         }
     }

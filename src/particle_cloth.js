@@ -43,7 +43,7 @@ function buildPanel() {
   }))
 
   panel.appendChild(SliderRow({
-    label: 'resolution', min: 4, max: 96, step: 1, value: 32,
+    label: 'resolution', min: 4, max: 200, step: 1, value: 32,
     onChange: v => { currentResolution = v; set_particle_resolution(Math.round(v)) },
   }))
 
@@ -167,8 +167,8 @@ init().then(async () => {
   // Particle-cloth defaults: distance constraints only, lots of substeps, hard contacts.
   set_use_distance_constraints(true)
   set_constraint_iters(1)
-  set_num_substeps(20)
-  set_time_step(0.01)
+  set_num_substeps(50)
+  set_time_step(0.005)
   set_damping(0.0001)
   set_gravity_enabled(true)
   set_gravity_g(-9.8)
