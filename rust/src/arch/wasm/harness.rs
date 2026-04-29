@@ -1043,7 +1043,7 @@ pub fn set_paper_hinge_compliance(alpha: f64) {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
             for hinge in &mut s.sim.hinges {
-                hinge.compliance = alpha as f32;
+                hinge.compliance = (alpha as f32) / hinge.rest_edge_len.max(1e-12);
             }
         }
     });

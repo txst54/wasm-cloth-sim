@@ -55,6 +55,8 @@ pub struct HingeConstraint {
     /// Actual dihedral goal = rest_angle + current_angle.
     pub current_angle: f32,
     pub compliance: f32,
+    /// Nominal length of the hinge edge (used to normalise compliance).
+    pub rest_edge_len: f32,
     pub direction: FoldDirection,
     /// XPBD constraint damping β (stiffness, not inverse).
     pub damping: f32,
@@ -238,13 +240,15 @@ impl PaperSim {
             if let Some(&di) = edge_to_diamond.get(&key) {
                 let [a, b, c, d] = self.core.diamonds[di];
                 let rest_angle = dihedral_angle(&self.core.q, a, b, c, d);
+                let edge_len = (self.core.q_rest.row(b as usize) - self.core.q_rest.row(a as usize)).norm();
 
                 self.hinges.push(HingeConstraint {
                     diamond_idx: di,
                     rest_angle,
                     target_angle: spec.target_angle,
                     current_angle: 0.0,
-                    compliance: spec.compliance,
+                    compliance: spec.compliance / edge_len.max(1e-12),
+                    rest_edge_len: edge_len,
                     direction: spec.direction,
                     damping: spec.damping,
                     lambda: 0.0,
