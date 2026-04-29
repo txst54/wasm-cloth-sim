@@ -14,6 +14,9 @@ required-features = ["native"]
 [features]
 default = []
 native = ["serde", "serde_json"]
+# GPU compute path for ParticleClothSim. WASM-only — enabling on a non-wasm
+# target raises a compile_error in src/sim/mod.rs.
+gpu = []
 
 [dependencies]
 nalgebra = "0.33"

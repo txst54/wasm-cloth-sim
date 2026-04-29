@@ -72,6 +72,8 @@ struct ParticleAppState {
     light:      Light,
     camera:     Camera,
     sim:        ParticleClothSim,
+    #[cfg(feature = "gpu")]
+    gpu_sim:    crate::sim::ParticleClothSimGpu,
     sphere_cloth: Option<Cloth>,
     ground_cloth: Option<Cloth>,
     params:     Rc<RefCell<SimParams>>,
@@ -1544,6 +1546,16 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
     let ground_y = sphere_center[1] - sphere_radius;
     sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), ground_y));
 
+    #[cfg(feature = "gpu")]
+    let gpu_sim = {
+        let mut g = crate::sim::ParticleClothSimGpu::from_cpu(
+            ctx.device.clone(), ctx.queue.clone(), &sim,
+        );
+        g.set_obstacles(&sim.obstacles);
+        web_sys::console::log_1(&"[psim] GPU compute path enabled".into());
+        g
+    };
+
     // Visualize the sphere with an octahedron mesh.
     let (sv, sf) = octa_sphere_mesh(sphere_center, sphere_radius);
     let sphere_colors = vec![[0.85, 0.45, 0.30]; sf.len()];
@@ -1579,6 +1591,8 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
     let state = Rc::new(RefCell::new(ParticleAppState {
         ctx, cloth, light, camera, sim,
+        #[cfg(feature = "gpu")]
+        gpu_sim,
         sphere_cloth: Some(sphere_cloth),
         ground_cloth: Some(ground_cloth),
         params: PARAMS.with(|p| p.clone()),
@@ -1661,6 +1675,9 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
     *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
         let mut s = state_inner.borrow_mut();
+        #[cfg(feature = "gpu")]
+        let ParticleAppState { sim, gpu_sim, cloth, sphere_cloth, ground_cloth, ctx, light, camera, params, keys, .. } = &mut *s;
+        #[cfg(not(feature = "gpu"))]
         let ParticleAppState { sim, cloth, sphere_cloth, ground_cloth, ctx, light, camera, params, keys, .. } = &mut *s;
 
         const ROT_SPEED: f32 = 0.02;
@@ -1677,7 +1694,28 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
         if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
         if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
 
-        sim.step(&params.borrow());
+        #[cfg(feature = "gpu")]
+        {
+            // Drain previous frame's readback into gpu_sim.positions_cache.
+            gpu_sim.poll_readback();
+            // Mirror latest GPU positions into the CPU sim's q so picking,
+            // rendering, and existing code paths keep working unchanged.
+            {
+                use crate::sim::traits::MeshSim;
+                sim.q.copy_from(gpu_sim.positions());
+            }
+            // Forward mouse drag state to the GPU sim before stepping.
+            {
+                use crate::sim::traits::MeshSim;
+                gpu_sim.set_clicked_vertex(sim.clicked_vertex);
+                gpu_sim.set_mouse_pos(sim.mouse_pos);
+                gpu_sim.step(&params.borrow());
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            sim.step(&params.borrow());
+        }
         cloth.sync_from_sim(&sim.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
@@ -1718,6 +1756,14 @@ pub fn set_particle_resolution(v: u32) {
             ));
             let ground_y = s.sphere_center[1] - s.sphere_radius;
             new_sim.add_obstacle(SdfObstacle::plane(na::Vector3::new(0.0, 1.0, 0.0), ground_y));
+            #[cfg(feature = "gpu")]
+            {
+                let mut g = crate::sim::ParticleClothSimGpu::from_cpu(
+                    s.ctx.device.clone(), s.ctx.queue.clone(), &new_sim,
+                );
+                g.set_obstacles(&new_sim.obstacles);
+                s.gpu_sim = g;
+            }
             s.cloth = new_cloth;
             s.sim   = new_sim;
             s.resolution = n;
