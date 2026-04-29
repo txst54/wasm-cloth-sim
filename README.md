@@ -139,3 +139,8 @@ rust/src/
 ```
 
 The architecture isolates platform-specific code in `arch/`. All `#[cfg]` attributes are contained in `arch/mod.rs` - core simulation code has no conditional compilation.
+
+
+### Extra Credit (CES)
+I Jeffery Xu, on my honor, have completed the CES evaluation for this class
+I Clint Wang, on my honor, have completed the CES evaluation for this class
