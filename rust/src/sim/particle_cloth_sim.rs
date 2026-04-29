@@ -147,6 +147,80 @@ impl ParticleClothSim {
         }
     }
 
+    /// Build from an arbitrary triangle mesh. `pinned` lists vertices to fix.
+    /// `skip_bend_edges` (normalised `(min,max)` pairs) excludes any diamond
+    /// whose shared edge matches; the caller (e.g. `ParticlePaperSim`) uses
+    /// this to hand bending of fold edges off to a hinge constraint.
+    pub fn from_mesh(
+        positions: &[[f32; 3]],
+        faces_in:  &[[u32; 3]],
+        pinned:    &[usize],
+        skip_bend_edges: &HashSet<(u32, u32)>,
+    ) -> Self {
+        let num_verts = positions.len();
+
+        let mut q = Positions::zeros(num_verts);
+        for (i, p) in positions.iter().enumerate() {
+            q[(i, 0)] = p[0]; q[(i, 1)] = p[1]; q[(i, 2)] = p[2];
+        }
+        let q_prev = q.clone();
+        let q_pred = q.clone();
+        let q_rest = q.clone();
+        let v = Positions::zeros(num_verts);
+
+        let mut w = na::DVector::from_element(num_verts, 1.0f32);
+        for &idx in pinned {
+            if idx < num_verts { w[idx] = 0.0; }
+        }
+
+        let mut faces = Faces::zeros(faces_in.len());
+        for (fi, f) in faces_in.iter().enumerate() {
+            faces[(fi, 0)] = f[0]; faces[(fi, 1)] = f[1]; faces[(fi, 2)] = f[2];
+        }
+
+        let edges     = build_edges(&faces);
+        let diamonds_all = build_diamonds(&faces);
+        let one_ring  = build_vertex_neighbors(&faces, num_verts);
+
+        // Drop any diamond whose shared edge is in skip_bend_edges.
+        let diamonds: Vec<[u32; 4]> = diamonds_all.into_iter()
+            .filter(|&[a, b, _, _]| {
+                let key = if a < b { (a, b) } else { (b, a) };
+                !skip_bend_edges.contains(&key)
+            })
+            .collect();
+
+        let edge_rest: Vec<f32> = edges.iter()
+            .map(|&[a, b]| (q.row(a as usize) - q.row(b as usize)).norm())
+            .collect();
+        let diamond_rest: Vec<f32> = diamonds.iter()
+            .map(|&[_, _, c, d]| (q.row(c as usize) - q.row(d as usize)).norm())
+            .collect();
+
+        let avg_edge = if edge_rest.is_empty() { 0.05 } else {
+            edge_rest.iter().sum::<f32>() / edge_rest.len() as f32
+        };
+        let r_val = 0.45 * avg_edge;
+        let r = vec![r_val; num_verts];
+        let r_max = r_val;
+
+        let cell_size = 2.0 * r_max;
+        let hash = ParticleHash::new(num_verts, cell_size);
+
+        let stretch_lambda = vec![0.0f32; edges.len()];
+        let bend_lambda    = vec![0.0f32; diamonds.len()];
+
+        Self {
+            q, q_prev, q_pred, q_rest, v, w, r, r_max,
+            faces, edges, edge_rest, diamonds, diamond_rest,
+            stretch_lambda, bend_lambda, one_ring,
+            hash, obstacles: Vec::new(),
+            contact_pairs: Vec::new(),
+            clicked_vertex: None, mouse_pos: [0.0; 3],
+            resolution: num_verts,
+        }
+    }
+
     pub fn add_obstacle(&mut self, o: SdfObstacle) { self.obstacles.push(o); }
 
     pub fn step(&mut self, params: &SimParams) {
@@ -300,7 +374,7 @@ impl ParticleClothSim {
         }
     }
 
-    fn project_self_contact(&mut self, alpha: f32, mu: f32) {
+    pub(super) fn project_self_contact(&mut self, alpha: f32, mu: f32) {
         let n = self.q.nrows();
         let mut neigh: Vec<u32> = Vec::with_capacity(64);
         for i in 0..n {
@@ -385,7 +459,7 @@ impl ParticleClothSim {
         }
     }
 
-    fn project_sdf_contact(&mut self, alpha: f32, mu: f32) {
+    pub(super) fn project_sdf_contact(&mut self, alpha: f32, mu: f32) {
         let n = self.q.nrows();
         for i in 0..n {
             let wi = self.w[i];

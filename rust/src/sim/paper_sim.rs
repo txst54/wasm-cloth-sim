@@ -381,7 +381,7 @@ impl PaperSim {
 /// Δpᵢ = wᵢ Δλ ∇C_i
 /// ```
 /// where `α̃ = α / dt²`, `β̃ = dt² β`, and the constraint `C = θ − θ_goal`.
-fn apply_hinge_xpbd(
+pub(crate) fn apply_hinge_xpbd(
     q:           &mut Positions,
     q_prev:      &Positions,
     w:           &na::DVector<f32>,
@@ -524,14 +524,14 @@ fn apply_crease_bend_xpbd(
 // ── Tiny inline utilities ─────────────────────────────────────────────────────
 
 #[inline]
-fn normalise_edge(a: u32, b: u32) -> (u32, u32) {
+pub(crate) fn normalise_edge(a: u32, b: u32) -> (u32, u32) {
     if a < b { (a, b) } else { (b, a) }
 }
 
 /// Compute dihedral "fold angle" for a diamond.
 /// Returns 0 for a flat mesh, negative for mountain folds, positive for valley folds.
 /// Range: [-π, π]
-fn dihedral_angle(q: &Positions, a: u32, b: u32, c: u32, d: u32) -> f32 {
+pub(crate) fn dihedral_angle(q: &Positions, a: u32, b: u32, c: u32, d: u32) -> f32 {
     let pa = row3(q, a as usize); let pb = row3(q, b as usize);
     let pc = row3(q, c as usize); let pd = row3(q, d as usize);
     let edge = pb - pa;

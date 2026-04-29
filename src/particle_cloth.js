@@ -36,14 +36,14 @@ function buildPanel() {
   back.textContent = '← cloth sim'
   panel.appendChild(back)
 
-  let currentResolution = 32
+  let currentResolution = 150
   panel.appendChild(Button({
     label: 'reset sim',
     onClick: () => set_particle_resolution(Math.round(currentResolution)),
   }))
 
   panel.appendChild(SliderRow({
-    label: 'resolution', min: 4, max: 200, step: 1, value: 32,
+    label: 'resolution', min: 4, max: 200, step: 1, value: 150,
     onChange: v => { currentResolution = v; set_particle_resolution(Math.round(v)) },
   }))
 
@@ -167,9 +167,10 @@ init().then(async () => {
   // Particle-cloth defaults: distance constraints only, lots of substeps, hard contacts.
   set_use_distance_constraints(true)
   set_constraint_iters(1)
-  set_num_substeps(50)
+  set_num_substeps(5)
   set_time_step(0.005)
-  set_damping(0.0001)
+  set_particle_resolution(Math.round(150))
+  set_damping(0.0005)
   set_gravity_enabled(true)
   set_gravity_g(-9.8)
   set_stretch_enabled(true)
@@ -184,5 +185,6 @@ init().then(async () => {
   } catch (e) {
     console.error('run_particle_cloth() failed:', e)
   }
+  set_particle_resolution(120)
   buildPanel()
 })

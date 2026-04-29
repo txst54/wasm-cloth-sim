@@ -712,8 +712,212 @@ impl ParticleClothSimGpu {
         self.num_obstacles = need;
     }
 
-    fn dispatch_count(invocations: u32, group: u32) -> u32 {
+    pub fn dispatch_count(invocations: u32, group: u32) -> u32 {
         if invocations == 0 { 0 } else { (invocations + group - 1) / group }
+    }
+
+    // ── Public accessors used by ParticlePaperSimGpu ──────────────────────────
+
+    pub fn device(&self) -> &wgpu::Device { &self.device }
+    pub fn queue(&self)  -> &wgpu::Queue  { &self.queue }
+    pub fn q_buffer(&self)     -> &wgpu::Buffer { &self.q_buf }
+    pub fn q_prev_buffer(&self) -> &wgpu::Buffer { &self.q_prev_buf }
+    pub fn w_inv_buffer(&self) -> &wgpu::Buffer { &self.w_inv_buf }
+    pub fn n_particles(&self) -> u32 { self.n }
+
+    // ── Per-substep encoding stages (composable from outer sims) ─────────────
+
+    pub fn encode_predict(&self, enc: &mut wgpu::CommandEncoder, h: f32, g: f32, damping: f32) {
+        let n = self.n;
+        self.queue.write_buffer(&self.predict_u, 0,
+            bytemuck::bytes_of(&PredictParams { h, g, damping, n }));
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("predict"), timestamp_writes: None });
+        p.set_pipeline(&self.pl_predict);
+        p.set_bind_group(0, &self.bg_predict, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(n, 256), 1, 1);
+    }
+
+    pub fn encode_copy_q_to_pred(&self, enc: &mut wgpu::CommandEncoder) {
+        let n = self.n;
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("copy_q_to_pred"), timestamp_writes: None });
+        p.set_pipeline(&self.pl_copy_pred);
+        p.set_bind_group(0, &self.bg_copy_pred, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(n, 256), 1, 1);
+    }
+
+    pub fn encode_zero_lambdas(&self, enc: &mut wgpu::CommandEncoder) {
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("zero_lambda"), timestamp_writes: None });
+        p.set_pipeline(&self.pl_zero_f32);
+        p.set_bind_group(0, &self.bg_zero_lambda_s, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(self.n_edges, 256), 1, 1);
+        p.set_bind_group(0, &self.bg_zero_lambda_b, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(self.n_bends, 256), 1, 1);
+    }
+
+    /// Distance constraints, one color class at a time.
+    pub fn encode_distance_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        h: f32,
+        alpha: f32,
+        stretch: bool,
+    ) {
+        let coloring = if stretch { &self.stretch_coloring } else { &self.bend_coloring };
+        let bg_pair  = if stretch { &self.bg_distance_stretch } else { &self.bg_distance_bend };
+        let us       = if stretch { &self.distance_us_stretch } else { &self.distance_us_bend };
+        let cores    = if stretch { &self.bg_distance_core_stretch } else { &self.bg_distance_core_bend };
+        let label    = if stretch { "distance_stretch" } else { "distance_bend" };
+
+        for k in 0..coloring.num_colors() {
+            let base = coloring.offsets[k];
+            let size = coloring.offsets[k + 1] - base;
+            if size == 0 { continue; }
+            self.queue.write_buffer(&us[k], 0,
+                bytemuck::bytes_of(&DistanceParams { h, alpha, n_color: size, base }));
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label), timestamp_writes: None });
+            p.set_pipeline(&self.pl_distance);
+            p.set_bind_group(0, &cores[k], &[]);
+            p.set_bind_group(1, bg_pair, &[]);
+            p.dispatch_workgroups(Self::dispatch_count(size, 64), 1, 1);
+        }
+    }
+
+    pub fn encode_self_collision(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        h: f32,
+        alpha_c: f32,
+        mu: f32,
+    ) {
+        let n = self.n;
+        let n_workgroups_n = Self::dispatch_count(n, 256);
+        let inv_hash_h = 1.0 / (2.0 * self.r_max);
+        // Zero cell_count + dq.
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_hash_dq"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_zero_u32);
+            p.set_bind_group(0, &self.bg_zero_cellcount, &[]);
+            p.dispatch_workgroups(Self::dispatch_count(self.table_size, 256), 1, 1);
+            p.set_bind_group(0, &self.bg_zero_dq, &[]);
+            p.dispatch_workgroups(Self::dispatch_count(n * 3, 256), 1, 1);
+        }
+        self.queue.write_buffer(&self.hash_count_u, 0,
+            bytemuck::bytes_of(&HashCountParams {
+                inv_h: inv_hash_h, table_size: self.table_size, n, _p: 0,
+            }));
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("hash_count"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_hash_count);
+            p.set_bind_group(0, &self.bg_hash_count, &[]);
+            p.dispatch_workgroups(n_workgroups_n, 1, 1);
+        }
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("hash_scan"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_hash_scan);
+            p.set_bind_group(0, &self.bg_hash_scan, &[]);
+            p.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("hash_scatter"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_hash_scatter);
+            p.set_bind_group(0, &self.bg_hash_scatter, &[]);
+            p.dispatch_workgroups(n_workgroups_n, 1, 1);
+        }
+        self.queue.write_buffer(&self.contact_u, 0,
+            bytemuck::bytes_of(&ContactParams {
+                h, alpha: alpha_c, mu, n,
+                inv_h: inv_hash_h, ts: self.table_size,
+                scale: FIXED_POINT_SCALE, _pad: 0,
+            }));
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("contact_jacobi"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_contact);
+            p.set_bind_group(0, &self.bg_contact_core, &[]);
+            p.set_bind_group(1, &self.bg_contact_hash, &[]);
+            p.set_bind_group(2, &self.bg_contact_dq, &[]);
+            p.dispatch_workgroups(Self::dispatch_count(n, 64), 1, 1);
+        }
+        self.queue.write_buffer(&self.contact_apply_u, 0,
+            bytemuck::bytes_of(&ContactApplyParams {
+                n, inv_scale: 1.0 / FIXED_POINT_SCALE, _p0: 0, _p1: 0,
+            }));
+        {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("contact_apply"), timestamp_writes: None });
+            p.set_pipeline(&self.pl_contact_apply);
+            p.set_bind_group(0, &self.bg_contact_apply, &[]);
+            p.dispatch_workgroups(n_workgroups_n, 1, 1);
+        }
+    }
+
+    pub fn encode_sdf(&self, enc: &mut wgpu::CommandEncoder, alpha_c: f32, mu: f32) {
+        if self.num_obstacles == 0 { return; }
+        let n = self.n;
+        self.queue.write_buffer(&self.sdf_u, 0,
+            bytemuck::bytes_of(&SdfParams {
+                alpha: alpha_c, mu, n, num_obs: self.num_obstacles,
+            }));
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("sdf_contact"), timestamp_writes: None });
+        p.set_pipeline(&self.pl_sdf);
+        p.set_bind_group(0, &self.bg_sdf, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(n, 256), 1, 1);
+    }
+
+    pub fn encode_pin_velocity(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        h: f32,
+        pin_enabled: bool,
+    ) {
+        let n = self.n;
+        let (mouse_idx, pin_flag) = match (pin_enabled, self.clicked_vertex) {
+            (true, Some(vi)) if vi < n as usize => (vi as u32, 1u32),
+            (true, _)                            => (u32::MAX, 1u32),
+            _                                    => (u32::MAX, 0u32),
+        };
+        self.queue.write_buffer(&self.pin_vel_u, 0,
+            bytemuck::bytes_of(&PinVelParams {
+                inv_h: 1.0 / h, pin_enabled: pin_flag, mouse_idx, n,
+                mouse_pos: [self.mouse_pos[0], self.mouse_pos[1], self.mouse_pos[2], 0.0],
+            }));
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pin_velocity"), timestamp_writes: None });
+        p.set_pipeline(&self.pl_pin_vel);
+        p.set_bind_group(0, &self.bg_pin_vel, &[]);
+        p.dispatch_workgroups(Self::dispatch_count(n, 256), 1, 1);
+    }
+
+    /// Encode the staging-buffer copy if a previous map isn't pending. Returns
+    /// whether the copy was encoded — pass that to `finalize_submit`.
+    pub fn encode_readback_kick(&self, enc: &mut wgpu::CommandEncoder) -> bool {
+        let kick = !self.map_flags.lock().unwrap().inflight;
+        if kick {
+            enc.copy_buffer_to_buffer(&self.q_buf, 0, &self.staging_q, 0, (self.n as u64) * 16);
+        }
+        kick
+    }
+
+    /// Submit the encoder and arm the async map_async if `kicked`.
+    pub fn finalize_submit(&mut self, enc: wgpu::CommandEncoder, kicked: bool) {
+        self.queue.submit([enc.finish()]);
+        if kicked {
+            self.map_flags.lock().unwrap().inflight = true;
+            let flags = self.map_flags.clone();
+            self.staging_q.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                let mut f = flags.lock().unwrap();
+                if res.is_ok() { f.ready = true; } else { f.inflight = false; }
+            });
+        }
     }
 
     /// Run one full `step` (n_substeps internal substeps) on the GPU.
@@ -733,216 +937,29 @@ impl ParticleClothSimGpu {
         let alpha_c = 0.0f32;
         let mu = if params.friction_enabled { params.friction_mu as f32 } else { 0.0 };
 
-        let inv_hash_h = 1.0 / (2.0 * self.r_max);
-
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("psim_gpu_step"),
         });
 
-        let n = self.n;
-        let n_workgroups_n = Self::dispatch_count(n, 256);
-
         for _sub in 0..n_sub {
-            // ─ Predict ────────────────────────────────────────────────────
-            self.queue.write_buffer(&self.predict_u, 0,
-                bytemuck::bytes_of(&PredictParams { h, g, damping, n }));
-            {
-                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("predict"), timestamp_writes: None });
-                p.set_pipeline(&self.pl_predict);
-                p.set_bind_group(0, &self.bg_predict, &[]);
-                p.dispatch_workgroups(n_workgroups_n, 1, 1);
-            }
-
-            // q_pred ← q
-            {
-                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("copy_q_to_pred"), timestamp_writes: None });
-                p.set_pipeline(&self.pl_copy_pred);
-                p.set_bind_group(0, &self.bg_copy_pred, &[]);
-                p.dispatch_workgroups(n_workgroups_n, 1, 1);
-            }
-
-            // Reset λ.
-            {
-                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("zero_lambda"), timestamp_writes: None });
-                p.set_pipeline(&self.pl_zero_f32);
-                p.set_bind_group(0, &self.bg_zero_lambda_s, &[]);
-                p.dispatch_workgroups(Self::dispatch_count(self.n_edges, 256), 1, 1);
-                p.set_bind_group(0, &self.bg_zero_lambda_b, &[]);
-                p.dispatch_workgroups(Self::dispatch_count(self.n_bends, 256), 1, 1);
-            }
-
-            // ─ Distance constraints (stretch) ────────────────────────────
+            self.encode_predict(&mut enc, h, g, damping);
+            self.encode_copy_q_to_pred(&mut enc);
+            self.encode_zero_lambdas(&mut enc);
             if params.stretch_enabled {
-                self.run_distance_color(&mut enc, h, alpha_s, /*stretch=*/ true);
+                self.encode_distance_pass(&mut enc, h, alpha_s, /*stretch=*/ true);
             }
-            // ─ Distance constraints (bend) ───────────────────────────────
             if params.bending_enabled {
-                self.run_distance_color(&mut enc, h, alpha_b, /*stretch=*/ false);
+                self.encode_distance_pass(&mut enc, h, alpha_b, /*stretch=*/ false);
             }
-
-            // ─ Self-collision ────────────────────────────────────────────
             if params.self_collision_enabled {
-                // Zero cell_count + dq.
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("zero_hash_dq"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_zero_u32);
-                    p.set_bind_group(0, &self.bg_zero_cellcount, &[]);
-                    p.dispatch_workgroups(Self::dispatch_count(self.table_size, 256), 1, 1);
-                    p.set_bind_group(0, &self.bg_zero_dq, &[]);
-                    p.dispatch_workgroups(Self::dispatch_count(n * 3, 256), 1, 1);
-                }
-                // Hash count.
-                self.queue.write_buffer(&self.hash_count_u, 0,
-                    bytemuck::bytes_of(&HashCountParams {
-                        inv_h: inv_hash_h, table_size: self.table_size, n, _p: 0,
-                    }));
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("hash_count"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_hash_count);
-                    p.set_bind_group(0, &self.bg_hash_count, &[]);
-                    p.dispatch_workgroups(n_workgroups_n, 1, 1);
-                }
-                // Hash scan (single workgroup).
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("hash_scan"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_hash_scan);
-                    p.set_bind_group(0, &self.bg_hash_scan, &[]);
-                    p.dispatch_workgroups(1, 1, 1);
-                }
-                // Hash scatter.
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("hash_scatter"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_hash_scatter);
-                    p.set_bind_group(0, &self.bg_hash_scatter, &[]);
-                    p.dispatch_workgroups(n_workgroups_n, 1, 1);
-                }
-                // Contact Jacobi.
-                self.queue.write_buffer(&self.contact_u, 0,
-                    bytemuck::bytes_of(&ContactParams {
-                        h, alpha: alpha_c, mu, n,
-                        inv_h: inv_hash_h, ts: self.table_size,
-                        scale: FIXED_POINT_SCALE, _pad: 0,
-                    }));
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("contact_jacobi"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_contact);
-                    p.set_bind_group(0, &self.bg_contact_core, &[]);
-                    p.set_bind_group(1, &self.bg_contact_hash, &[]);
-                    p.set_bind_group(2, &self.bg_contact_dq, &[]);
-                    p.dispatch_workgroups(Self::dispatch_count(n, 64), 1, 1);
-                }
-                // Apply dq → q.
-                self.queue.write_buffer(&self.contact_apply_u, 0,
-                    bytemuck::bytes_of(&ContactApplyParams {
-                        n, inv_scale: 1.0 / FIXED_POINT_SCALE, _p0: 0, _p1: 0,
-                    }));
-                {
-                    let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("contact_apply"), timestamp_writes: None });
-                    p.set_pipeline(&self.pl_contact_apply);
-                    p.set_bind_group(0, &self.bg_contact_apply, &[]);
-                    p.dispatch_workgroups(n_workgroups_n, 1, 1);
-                }
+                self.encode_self_collision(&mut enc, h, alpha_c, mu);
             }
-
-            // ─ SDF contact ───────────────────────────────────────────────
-            if self.num_obstacles > 0 {
-                self.queue.write_buffer(&self.sdf_u, 0,
-                    bytemuck::bytes_of(&SdfParams {
-                        alpha: alpha_c, mu, n, num_obs: self.num_obstacles,
-                    }));
-                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("sdf_contact"), timestamp_writes: None });
-                p.set_pipeline(&self.pl_sdf);
-                p.set_bind_group(0, &self.bg_sdf, &[]);
-                p.dispatch_workgroups(n_workgroups_n, 1, 1);
-            }
-
-            // ─ Pin + velocity update ─────────────────────────────────────
-            let (mouse_idx, pin_enabled) = match (params.pin_enabled, self.clicked_vertex) {
-                (true, Some(vi)) if vi < n as usize => (vi as u32, 1u32),
-                (true, _)                            => (u32::MAX, 1u32),
-                _                                    => (u32::MAX, 0u32),
-            };
-            self.queue.write_buffer(&self.pin_vel_u, 0,
-                bytemuck::bytes_of(&PinVelParams {
-                    inv_h: 1.0 / h, pin_enabled, mouse_idx, n,
-                    mouse_pos: [self.mouse_pos[0], self.mouse_pos[1], self.mouse_pos[2], 0.0],
-                }));
-            {
-                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("pin_velocity"), timestamp_writes: None });
-                p.set_pipeline(&self.pl_pin_vel);
-                p.set_bind_group(0, &self.bg_pin_vel, &[]);
-                p.dispatch_workgroups(n_workgroups_n, 1, 1);
-            }
-
-            // NOTE: cloth-cloth velocity-averaging damping not implemented on GPU
-            // yet; it requires the contact-pair list which we don't materialize
-            // in the Jacobi path. Add a follow-up pass if needed.
+            self.encode_sdf(&mut enc, alpha_c, mu);
+            self.encode_pin_velocity(&mut enc, h, params.pin_enabled);
         }
 
-        // Kick off readback into staging_q only when the staging buffer is
-        // not currently mapped or awaiting map. Otherwise we'd submit a copy
-        // into a mapped buffer, which is invalid.
-        let kick = !self.map_flags.lock().unwrap().inflight;
-        if kick {
-            enc.copy_buffer_to_buffer(&self.q_buf, 0, &self.staging_q, 0, (n as u64) * 16);
-        }
-
-        self.queue.submit([enc.finish()]);
-
-        if kick {
-            self.map_flags.lock().unwrap().inflight = true;
-            let flags = self.map_flags.clone();
-            self.staging_q.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-                let mut f = flags.lock().unwrap();
-                if res.is_ok() {
-                    f.ready = true;
-                } else {
-                    f.inflight = false;
-                }
-            });
-        }
-    }
-
-    fn run_distance_color(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        h: f32,
-        alpha: f32,
-        stretch: bool,
-    ) {
-        let coloring = if stretch { &self.stretch_coloring } else { &self.bend_coloring };
-        let bg_pair  = if stretch { &self.bg_distance_stretch } else { &self.bg_distance_bend };
-        let us       = if stretch { &self.distance_us_stretch } else { &self.distance_us_bend };
-        let cores    = if stretch { &self.bg_distance_core_stretch } else { &self.bg_distance_core_bend };
-        let label    = if stretch { "distance_stretch" } else { "distance_bend" };
-
-        for k in 0..coloring.num_colors() {
-            let base = coloring.offsets[k];
-            let size = coloring.offsets[k + 1] - base;
-            if size == 0 { continue; }
-            // Each color writes its own dedicated uniform buffer so all
-            // pre-submit `write_buffer` flushes remain consistent with the
-            // dispatch that consumes them.
-            self.queue.write_buffer(&us[k], 0,
-                bytemuck::bytes_of(&DistanceParams { h, alpha, n_color: size, base }));
-            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(label), timestamp_writes: None });
-            p.set_pipeline(&self.pl_distance);
-            p.set_bind_group(0, &cores[k], &[]);
-            p.set_bind_group(1, bg_pair, &[]);
-            p.dispatch_workgroups(Self::dispatch_count(size, 64), 1, 1);
-        }
+        let kick = self.encode_readback_kick(&mut enc);
+        self.finalize_submit(enc, kick);
     }
 
     /// Drain a completed staging map into `positions_cache`, then schedule a
