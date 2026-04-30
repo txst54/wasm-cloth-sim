@@ -144,3 +144,4 @@ The architecture isolates platform-specific code in `arch/`. All `#[cfg]` attrib
 ### Extra Credit (CES)
 I Jeffery Xu, on my honor, have completed the CES evaluation for this class
 I Clint Wang, on my honor, have completed the CES evaluation for this class
+CJW4592, JJX97
