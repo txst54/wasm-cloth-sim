@@ -32,7 +32,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build WASM
-        run: cd rust && wasm-pack build --target web
+        run: cd rust && wasm-pack build --target web --features gpu
 
       - name: Install Node dependencies
         run: npm ci

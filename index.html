@@ -10,8 +10,12 @@
   <body>
     <canvas id="canvas" width="1920" height="1080"></canvas>
     <script type="module">
-      if (location.pathname.startsWith('/paper')) {
+      if (location.pathname.startsWith('/particle_paper')) {
+        import('/src/particle_paper.js')
+      } else if (location.pathname.startsWith('/paper')) {
         import('/src/paper.js')
+      } else if (location.pathname.startsWith('/particle')) {
+        import('/src/particle_cloth.js')
       } else {
         import('/src/main.js')
       }

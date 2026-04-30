@@ -1,3 +1,4 @@
+use nalgebra as na;
 use crate::sim::shared::{Positions, Faces};
 
 /// Axis-aligned bounding box.
@@ -172,7 +173,91 @@ impl Bvh {
     }
 }
 
+impl Bvh {
+    /// Build a BVH over rigid body triangles with swept AABBs (prev→curr positions).
+    /// Each leaf AABB is the union of the triangle at the previous and current step,
+    /// padded by `padding`, so CCD queries don't miss fast-moving faces.
+    pub fn build_from_verts(
+        curr_verts: &[na::Vector3<f32>],
+        prev_verts: &[na::Vector3<f32>],
+        faces: &[[u32; 3]],
+        padding: f32,
+    ) -> Option<Self> {
+        let m = faces.len();
+        if m == 0 { return None; }
+
+        let mut leaf_aabbs: Vec<Aabb> = faces
+            .iter()
+            .map(|&[i0, i1, i2]| {
+                let mut aabb = Aabb::empty();
+                for &vi in &[i0, i1, i2] {
+                    let c = curr_verts[vi as usize];
+                    let p = prev_verts[vi as usize];
+                    aabb.expand([c.x, c.y, c.z]);
+                    aabb.expand([p.x, p.y, p.z]);
+                }
+                if padding > 0.0 { aabb.padded(padding) } else { aabb }
+            })
+            .collect();
+
+        let mut face_indices: Vec<u32> = (0..m as u32).collect();
+        let mut nodes: Vec<BvhNode> = Vec::with_capacity(2 * m);
+        let root = build_recursive(&mut nodes, &mut leaf_aabbs, &mut face_indices, 0, m);
+        Some(Bvh { nodes, root })
+    }
+
+    /// Return (cloth_vi, rigid_fi) candidate pairs.
+    /// Each cloth vertex AABB is swept over q_prev→q and padded by `threshold`;
+    /// each rigid triangle AABB was swept during `build_from_verts`.
+    pub fn cloth_rigid_pairs(
+        &self,
+        cloth_q: &Positions,
+        cloth_q_prev: &Positions,
+        threshold: f32,
+    ) -> Vec<(usize, u32)> {
+        let mut pairs = Vec::new();
+        for vi in 0..cloth_q.nrows() {
+            let vertex_aabb = Aabb {
+                min: [
+                    cloth_q[(vi,0)].min(cloth_q_prev[(vi,0)]) - threshold,
+                    cloth_q[(vi,1)].min(cloth_q_prev[(vi,1)]) - threshold,
+                    cloth_q[(vi,2)].min(cloth_q_prev[(vi,2)]) - threshold,
+                ],
+                max: [
+                    cloth_q[(vi,0)].max(cloth_q_prev[(vi,0)]) + threshold,
+                    cloth_q[(vi,1)].max(cloth_q_prev[(vi,1)]) + threshold,
+                    cloth_q[(vi,2)].max(cloth_q_prev[(vi,2)]) + threshold,
+                ],
+            };
+            traverse_cloth_rigid(&self.nodes, self.root, &vertex_aabb, vi as u32, &mut pairs);
+        }
+        pairs
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Traverse the rigid BVH for a single cloth vertex AABB, collecting leaf hits.
+fn traverse_cloth_rigid(
+    nodes: &[BvhNode],
+    node_idx: u32,
+    vertex_aabb: &Aabb,
+    vi: u32,
+    pairs: &mut Vec<(usize, u32)>,
+) {
+    let node = &nodes[node_idx as usize];
+    if !vertex_aabb.overlaps(node.aabb()) { return; }
+    match node {
+        BvhNode::Leaf { face_idx, .. } => {
+            pairs.push((vi as usize, *face_idx));
+        }
+        BvhNode::Internal { left, right, .. } => {
+            let (l, r) = (*left, *right);
+            traverse_cloth_rigid(nodes, l, vertex_aabb, vi, pairs);
+            traverse_cloth_rigid(nodes, r, vertex_aabb, vi, pairs);
+        }
+    }
+}
 
 /// Swept AABB for triangle fi: union of its bbox at t=0 and t=1.
 fn swept_triangle_aabb(

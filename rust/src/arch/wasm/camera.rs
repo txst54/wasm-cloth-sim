@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::gpu::GpuContext;
+use super::gpu::GpuContext;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -12,13 +12,12 @@ struct CameraUniform {
 }
 
 pub struct Camera {
-    pub yaw:   f32,   // horizontal rotation (radians)
-    pub pitch: f32,   // vertical rotation (radians)
+    pub yaw:   f32,
+    pub pitch: f32,
     pub dist:   f32,
     pub aspect: f32,
-    /// World-space eye position (updated on every `update()` call).
+    pub target: [f32; 3],
     pub eye: [f32; 3],
-    /// Inverse view-projection in row-major order — used for CPU-side unprojection.
     pub inv_view_proj: [[f32; 4]; 4],
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group:        wgpu::BindGroup,
@@ -31,8 +30,9 @@ impl Camera {
         let yaw   = 0.3f32;
         let pitch = 0.3f32;
         let dist  = 2.0f32;
+        let target = [0.0, 0.0, 0.0];
 
-        let built = Self::build(yaw, pitch, dist, aspect);
+        let built = Self::build(yaw, pitch, dist, target, aspect);
 
         let uniform_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera UB"),
@@ -66,7 +66,7 @@ impl Camera {
         });
 
         Self {
-            yaw, pitch, dist, aspect,
+            yaw, pitch, dist, aspect, target,
             eye: built.eye,
             inv_view_proj: built.inv_view_proj,
             bind_group_layout, bind_group, uniform_buffer,
@@ -74,26 +74,36 @@ impl Camera {
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue) {
-        let built = Self::build(self.yaw, self.pitch, self.dist, self.aspect);
+        let built = Self::build(self.yaw, self.pitch, self.dist, self.target, self.aspect);
         self.eye           = built.eye;
         self.inv_view_proj = built.inv_view_proj;
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&built.uniform));
     }
 
-    fn build(yaw: f32, pitch: f32, dist: f32, aspect: f32) -> Built {
+    pub fn forward(&self) -> [f32; 3] {
+        normalize3([
+            -self.pitch.cos() * self.yaw.sin(),
+            -self.pitch.sin(),
+            -self.pitch.cos() * self.yaw.cos(),
+        ])
+    }
+
+    pub fn right(&self) -> [f32; 3] {
+        normalize3(cross3(self.forward(), [0.0, 1.0, 0.0]))
+    }
+
+    fn build(yaw: f32, pitch: f32, dist: f32, target: [f32; 3], aspect: f32) -> Built {
         let eye = [
-            pitch.cos() * yaw.sin() * dist,
-            pitch.sin() * dist,
-            pitch.cos() * yaw.cos() * dist,
+            target[0] + pitch.cos() * yaw.sin() * dist,
+            target[1] + pitch.sin() * dist,
+            target[2] + pitch.cos() * yaw.cos() * dist,
         ];
 
-        // ── GPU-side: column-major view-projection ────────────────────────────
-        let view_cm = look_at_col(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let view_cm = look_at_col(eye, target, [0.0, 1.0, 0.0]);
         let proj_cm = perspective_col(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
         let view_proj_cm = mat4_mul_col(proj_cm, view_cm);
 
-        // ── CPU-side: row-major inverse view-projection ───────────────────────
-        let inv_view_rm = inv_look_at_row(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let inv_view_rm = inv_look_at_row(eye, target, [0.0, 1.0, 0.0]);
         let inv_proj_rm = inv_perspective_row(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
         let inv_vp_rm   = mat4_mul_row(inv_view_rm, inv_proj_rm);
 
@@ -111,13 +121,10 @@ struct Built {
     inv_view_proj: [[f32; 4]; 4],
 }
 
-// ── Column-major helpers (for GPU upload) ────────────────────────────────────
-
 fn look_at_col(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
     let f = normalize3(sub3(center, eye));
     let r = normalize3(cross3(f, up));
     let u = cross3(r, f);
-    // Build row-major then transpose to column-major
     transpose4([
         [ r[0],  r[1],  r[2], -dot3(r, eye)],
         [ u[0],  u[1],  u[2], -dot3(u, eye)],
@@ -136,7 +143,6 @@ fn perspective_col(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4
     ])
 }
 
-/// Multiply two column-major 4×4 matrices: result[col][row] = Σ_k a[k][row]·b[col][k].
 fn mat4_mul_col(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut c = [[0.0f32; 4]; 4];
     for col in 0..4 {
@@ -158,10 +164,6 @@ fn transpose4(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     ]
 }
 
-// ── Row-major helpers (for CPU unprojection) ─────────────────────────────────
-
-/// Inverse of the look-at view matrix (row-major).
-/// For an orthonormal view matrix V = [R | -R·eye; 0 | 1],  V⁻¹ = [Rᵀ | eye; 0 | 1].
 fn inv_look_at_row(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
     let f = normalize3(sub3(center, eye));
     let r = normalize3(cross3(f, up));
@@ -174,11 +176,8 @@ fn inv_look_at_row(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 
     ]
 }
 
-/// Inverse of the perspective matrix (row-major, WebGPU Z in [0, 1]).
 fn inv_perspective_row(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
     let f = 1.0 / (fov_y * 0.5).tan();
-    // A = far/(near-far),  B = near·far/(near-far)
-    // 1/B = (near-far)/(near·far),  A/B = 1/near
     let inv_b = (near - far) / (near * far);
     let a_over_b = 1.0 / near;
     [
@@ -189,7 +188,6 @@ fn inv_perspective_row(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4
     ]
 }
 
-/// Multiply two row-major 4×4 matrices: result[row][col] = Σ_k a[row][k]·b[k][col].
 pub fn mat4_mul_row(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut c = [[0.0f32; 4]; 4];
     for row in 0..4 {
@@ -201,8 +199,6 @@ pub fn mat4_mul_row(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     }
     c
 }
-
-// ── Vec3 helpers ─────────────────────────────────────────────────────────────
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0]-b[0], a[1]-b[1], a[2]-b[2]]

@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{gpu::GpuContext, pipeline::PipelineBuilder};
+use crate::arch::wasm::{GpuContext, pipeline::PipelineBuilder};
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]

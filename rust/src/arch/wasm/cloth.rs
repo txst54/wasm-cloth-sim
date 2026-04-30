@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{camera::Camera, gpu::GpuContext, light::Light, pipeline::PipelineBuilder};
+use super::{camera::Camera, gpu::GpuContext, light::Light, pipeline::PipelineBuilder};
 use crate::sim::crease::CreaseType;
-
-// ── Vertex layout ────────────────────────────────────────────────────────────
+use crate::sim::Positions;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -21,22 +20,12 @@ impl Vertex {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,  // position
-            1 => Float32x3,  // normal
-            2 => Float32x3,  // color
-        ],
-    };
-
-    const WIREFRAME_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,  // position only
+            0 => Float32x3,
+            1 => Float32x3,
+            2 => Float32x3,
         ],
     };
 }
-
-// ── Wireframe vertex (position + color) ─────────────────────────────────────
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -50,13 +39,11 @@ impl WireframeVertex {
         array_stride: std::mem::size_of::<WireframeVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,  // position
-            1 => Float32x3,  // color
+            0 => Float32x3,
+            1 => Float32x3,
         ],
     };
 }
-
-// ── Shader ───────────────────────────────────────────────────────────────────
 
 const WIREFRAME_SHADER: &str = r#"
 struct LightUniform {
@@ -137,18 +124,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient = 0.15;
     let diffuse       = max(dot(n, light_dir), 0.0);
 
-    // Blinn-Phong specular — use actual camera position
     let view_dir = normalize(camera.position - in.world_position);
     let half_dir = normalize(light_dir + view_dir);
     let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.5;
 
     let lit = in.color * (ambient + diffuse * 0.85) + vec3<f32>(specular);
-    // return vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
 }
 "#;
-
-// ── Math helpers ─────────────────────────────────────────────────────────────
 
 fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
@@ -171,9 +154,6 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     if len > 1e-8 { [v[0]/len, v[1]/len, v[2]/len] } else { [0.0, 0.0, 1.0] }
 }
 
-/// Computes vertex normals as the area-weighted average of adjacent face normals.
-/// Each face normal is the (unnormalized) cross product of its edges, whose magnitude
-/// equals twice the triangle area, giving natural area weighting when accumulated.
 fn compute_vertex_normals(positions: &[[f32; 3]], n: usize) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; n * n];
     for row in 0..(n - 1) {
@@ -182,9 +162,7 @@ fn compute_vertex_normals(positions: &[[f32; 3]], n: usize) -> Vec<[f32; 3]> {
             let tr = tl + 1;
             let bl = (row + 1) * n + col;
             let br = bl + 1;
-            // Triangle 1: tl, tr, br
             let fn1 = cross(sub(positions[tr], positions[tl]), sub(positions[br], positions[tl]));
-            // Triangle 2: tl, br, bl
             let fn2 = cross(sub(positions[br], positions[tl]), sub(positions[bl], positions[tl]));
             for &vi in &[tl, tr, br] { normals[vi] = add(normals[vi], fn1); }
             for &vi in &[tl, br, bl] { normals[vi] = add(normals[vi], fn2); }
@@ -193,7 +171,6 @@ fn compute_vertex_normals(positions: &[[f32; 3]], n: usize) -> Vec<[f32; 3]> {
     normals.into_iter().map(normalize).collect()
 }
 
-/// Computes vertex normals for arbitrary triangular meshes.
 fn compute_mesh_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; positions.len()];
     for &[i0, i1, i2] in faces {
@@ -208,32 +185,22 @@ fn compute_mesh_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32;
     normals.into_iter().map(normalize).collect()
 }
 
-// ── Grid color ────────────────────────────────────────────────────────────────
-
 fn grid_color(row: usize, col: usize) -> [f32; 3] {
     if (row + col) % 2 == 0 { [0.75, 0.88, 1.00] } else { [0.75, 0.88, 1.00] }
 }
 
-// ── Cloth ────────────────────────────────────────────────────────────────────
-
-/// Mesh for rendering. Supports both NxN grids and arbitrary triangular meshes.
 pub struct Cloth {
     pub resolution: u32,
-    /// Flat array of vertex positions.
     pub positions: Vec<[f32; 3]>,
-    /// Face indices for arbitrary meshes (None for grid mode).
     pub faces: Option<Vec<[u32; 3]>>,
-    /// Per-vertex colors for arbitrary meshes.
     pub colors: Option<Vec<[f32; 3]>>,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
-    // Wireframe rendering
     wireframe_pipeline: wgpu::RenderPipeline,
     wireframe_vertex_buffer: wgpu::Buffer,
     wireframe_vertex_count: u32,
-    /// Per-edge data: (vertex_a, vertex_b, color) for rebuilding wireframe positions on upload.
     wireframe_edges: Vec<(u32, u32, [f32; 3])>,
     pub wireframe_enabled: bool,
 }
@@ -307,7 +274,6 @@ impl Cloth {
             .vertex_layout(Vertex::LAYOUT)
             .build();
 
-        // Wireframe: build edge vertices from grid (all gray for grid mode)
         let gray = [0.2f32, 0.2, 0.2];
         let mut wireframe_edges: Vec<(u32, u32, [f32; 3])> = Vec::new();
         for row in 0..n {
@@ -353,7 +319,6 @@ impl Cloth {
         }
     }
 
-    /// Create a Cloth from arbitrary mesh positions and faces.
     pub fn from_mesh(
         ctx: &GpuContext,
         positions: Vec<[f32; 3]>,
@@ -373,7 +338,6 @@ impl Cloth {
             }
         }).collect();
 
-        // Flatten face indices
         let indices: Vec<u32> = faces.iter().flat_map(|f| f.iter().copied()).collect();
         let index_count = indices.len() as u32;
 
@@ -411,7 +375,6 @@ impl Cloth {
             .vertex_layout(Vertex::LAYOUT)
             .build();
 
-        // Wireframe: extract unique edges, colored by crease type
         let mut edge_set = std::collections::HashSet::new();
         for &[i0, i1, i2] in &faces {
             let mut add_edge = |a: u32, b: u32| {
@@ -474,11 +437,18 @@ impl Cloth {
         }
     }
 
-    /// Re-upload positions (and recomputed normals) to the GPU.
-    /// Call after any simulation step.
+    /// Sync positions from simulation and upload to GPU.
+    pub fn sync_from_sim(&mut self, sim_positions: &Positions, ctx: &GpuContext) {
+        for (i, pos) in self.positions.iter_mut().enumerate() {
+            pos[0] = sim_positions[(i, 0)];
+            pos[1] = sim_positions[(i, 1)];
+            pos[2] = sim_positions[(i, 2)];
+        }
+        self.upload(ctx);
+    }
+
     pub fn upload(&self, ctx: &GpuContext) {
         let vertices: Vec<Vertex> = if let Some(ref faces) = self.faces {
-            // Arbitrary mesh mode
             let normals = compute_mesh_normals(&self.positions, faces);
             self.positions.iter().enumerate().map(|(i, &position)| {
                 Vertex {
@@ -490,7 +460,6 @@ impl Cloth {
                 }
             }).collect()
         } else {
-            // Grid mode
             let n = self.resolution as usize;
             let normals = compute_vertex_normals(&self.positions, n);
             self.positions.iter().enumerate().map(|(i, &position)| {
@@ -501,7 +470,6 @@ impl Cloth {
         };
         ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
-        // Update wireframe vertex positions (colors stay the same)
         if self.wireframe_enabled && !self.wireframe_edges.is_empty() {
             let wf_verts: Vec<WireframeVertex> = self.wireframe_edges.iter()
                 .flat_map(|&(a, b, color)| [
@@ -514,6 +482,21 @@ impl Cloth {
     }
 
     pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
+        self.render_impl(ctx, view, light, camera, true);
+    }
+
+    pub fn render_over(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
+        self.render_impl(ctx, view, light, camera, false);
+    }
+
+    fn render_impl(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera, clear: bool) {
+        let color_load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 })
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let depth_load = if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load };
+
         let mut encoder = ctx.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Cloth Encoder") },
         );
@@ -524,17 +507,11 @@ impl Cloth {
                     view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &ctx.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -548,7 +525,6 @@ impl Cloth {
             rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..self.index_count, 0, 0..1);
 
-            // Draw wireframe overlay if enabled
             if self.wireframe_enabled {
                 rpass.set_pipeline(&self.wireframe_pipeline);
                 rpass.set_bind_group(0, &light.bind_group, &[]);
