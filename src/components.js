@@ -144,6 +144,143 @@ export function Button({ label, onClick }) {
   return btn
 }
 
+/**
+ * Param — single source of truth for a numeric parameter.
+ * Drives both the WASM setter on init (.apply()) and the slider UI (.slider()).
+ * Mutating .value (via slider) keeps subsequent .apply() calls in sync.
+ */
+export class Param {
+  constructor({ label, min, max, step, value, onChange, transform = v => v, asInt = false }) {
+    Object.assign(this, { label, min, max, step, value, onChange, transform, asInt })
+  }
+  get applied() {
+    const v = this.asInt ? Math.round(this.value) : this.value
+    return this.transform(v)
+  }
+  apply() { this.onChange(this.applied) }
+  slider({ indent = false } = {}) {
+    return SliderRow({
+      label: this.label, min: this.min, max: this.max, step: this.step, value: this.value, indent,
+      onChange: v => { this.value = v; this.apply() },
+    })
+  }
+  toSliderOptions() {
+    return new SliderOptions({
+      weight: this.value,
+      weightLabel: this.label,
+      weightMin: this.min,
+      weightMax: this.max,
+      weightStep: this.step,
+      onWeightChange: v => { this.value = v; this.apply() },
+    })
+  }
+}
+
+/**
+ * Toggle — single source of truth for a boolean parameter.
+ */
+export class Toggle {
+  constructor({ enabled, onChange }) {
+    this.enabled = enabled
+    this.onChange = onChange
+  }
+  apply() { this.onChange(this.enabled) }
+}
+
+/** Build a ConstraintGroup driven by a Toggle + array of Param. */
+export function ParamConstraintGroup({ label, toggle, params }) {
+  return ConstraintGroup({
+    label,
+    enabled: toggle.enabled,
+    onToggle: v => { toggle.enabled = v; toggle.onChange(v) },
+    sliders: params.map(p => p.toSliderOptions()),
+  })
+}
+
+export const SIMS = [
+  { path: '/',                label: 'cloth' },
+  { path: '/paper',           label: 'paper' },
+  { path: '/particle',        label: 'particle cloth' },
+  { path: '/particle_paper',  label: 'particle paper' },
+]
+
+/** NavPanel — fixed top-right links to the other simulations. */
+export function NavPanel() {
+  const here = location.pathname
+  const isCurrent = (p) => {
+    if (p === '/')               return here === '/' || (!here.startsWith('/paper') && !here.startsWith('/particle'))
+    if (p === '/particle_paper') return here.startsWith('/particle_paper')
+    if (p === '/particle')       return here.startsWith('/particle') && !here.startsWith('/particle_paper')
+    if (p === '/paper')          return here.startsWith('/paper')
+    return false
+  }
+
+  const panel = el('div', 'fixed top-4 right-4 z-10 bg-black/75 backdrop-blur-sm text-white rounded-xl p-3 text-xs font-mono select-none')
+  const title = el('div', 'text-[10px] uppercase tracking-wider text-white/50 mb-2')
+  title.textContent = 'simulations'
+  panel.appendChild(title)
+
+  for (const s of SIMS) {
+    const a = el('a', 'block py-0.5 ' + (isCurrent(s.path)
+      ? 'text-white/90 font-semibold'
+      : 'text-white/50 hover:text-white/90'))
+    a.href = s.path
+    a.textContent = s.label
+    panel.appendChild(a)
+  }
+  document.body.appendChild(panel)
+  return panel
+}
+
+export const CREASE_PATTERNS = [
+  'line.cp',
+  'lines.cp',
+  'miura_ori.cp',
+  'waterbomb.cp',
+  'waterbomb_tess.cp',
+  'yaccho.cp',
+  'hex_torso.cp'
+]
+
+/**
+ * CreasePatternDropdown — labeled <select> of crease patterns.
+ *
+ * Props:
+ *   initial  {string}  filename (e.g. 'miura_ori.cp')
+ *   onLoad   {fn}      called with cpData string after fetch succeeds
+ */
+export function CreasePatternDropdown({ initial, onLoad }) {
+  const root = el('div', 'mb-2')
+
+  const labelRow = el('div', 'flex justify-between items-center mb-1')
+  const labelEl = el('span', 'text-white/60')
+  labelEl.textContent = 'crease pattern'
+  labelRow.appendChild(labelEl)
+
+  const sel = el('select', 'w-full bg-black/60 border border-white/20 rounded px-1 py-0.5 text-white/90 cursor-pointer focus:outline-none focus:border-sky-400')
+  for (const f of CREASE_PATTERNS) {
+    const opt = document.createElement('option')
+    opt.value = f
+    opt.textContent = f.replace(/\.cp$/, '')
+    if (f === initial) opt.selected = true
+    sel.appendChild(opt)
+  }
+  sel.addEventListener('change', async () => {
+    const file = `assets/${sel.value}`
+    try {
+      const r = await fetch(file)
+      if (!r.ok) throw new Error(`fetch ${file} -> ${r.status}`)
+      const cpData = await r.text()
+      onLoad(cpData)
+    } catch (e) {
+      console.error('crease pattern load failed:', e)
+    }
+  })
+
+  root.append(labelRow, sel)
+  return root
+}
+
 export class SliderOptions {
   constructor({
                 weight,
