@@ -1445,10 +1445,15 @@ pub fn set_resolution(v: u32) {
     APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
-            let new_cloth = Cloth::new(&s.ctx, v, &s.light);
-            let new_sim   = ClothSim::from_grid(v as usize);
-            s.cloth = new_cloth;
-            s.sim   = new_sim;
+            s.cloth = Cloth::new(&s.ctx, v, &s.light);
+            s.sim   = ClothSim::from_grid(v as usize);
+        }
+    });
+    COMBINED_APP_STATE.with(|a| {
+        if let Some(state) = a.borrow().as_ref() {
+            let mut s = state.borrow_mut();
+            s.cloth     = Cloth::new(&s.ctx, v, &s.light);
+            s.cloth_sim = ClothSim::from_grid(v as usize);
         }
     });
 }
