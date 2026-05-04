@@ -23,7 +23,8 @@ use super::input::{
     apply_camera_keys, install_handlers, install_keyboard_handlers, PickHost,
 };
 use crate::sim::shared::Positions;
-use super::light::Light;
+use super::light::Lighting;
+use super::cloth::Material;
 use super::platform::init_platform;
 use super::scene::{self, octa_sphere_mesh};
 use crate::params::SimParams;
@@ -59,7 +60,7 @@ fn get_canvas(canvas_id: &str) -> Result<(web_sys::Window, HtmlCanvasElement), J
 }
 
 /// `(ctx, light, camera)` — every entry point starts the same way.
-async fn build_basics(canvas: HtmlCanvasElement) -> Result<(GpuContext, Light, Camera), JsValue> {
+async fn build_basics(canvas: HtmlCanvasElement) -> Result<(GpuContext, Lighting, Camera), JsValue> {
     let ctx    = GpuContext::new(canvas).await?;
     let light  = scene::make_light(&ctx);
     let camera = Camera::new(&ctx);
@@ -88,7 +89,7 @@ fn run_raf<F: FnMut() + 'static>(window: &web_sys::Window, mut body: F) -> Resul
 struct AppState {
     ctx:    GpuContext,
     cloth:  Cloth,
-    light:  Light,
+    light:  Lighting,
     camera: Camera,
     sim:    ClothSim,
     params: Rc<RefCell<SimParams>>,
@@ -100,7 +101,7 @@ struct AppState {
 struct PaperAppState {
     ctx:        GpuContext,
     cloth:      Cloth,
-    light:      Light,
+    light:      Lighting,
     camera:     Camera,
     sim:        PaperSim,
     params:     Rc<RefCell<SimParams>>,
@@ -113,7 +114,7 @@ struct PaperAppState {
 struct RigidAppState {
     ctx:    GpuContext,
     cloth:  Cloth,
-    light:  Light,
+    light:  Lighting,
     camera: Camera,
     sim:    RigidSimCore,
     params: RigidSimParams,
@@ -124,7 +125,7 @@ struct RigidAppState {
 struct ParticleAppState {
     ctx:           GpuContext,
     cloth:         Cloth,
-    light:         Light,
+    light:         Lighting,
     camera:        Camera,
     sim:           ParticleClothSim,
     #[cfg(feature = "gpu")]
@@ -143,7 +144,7 @@ struct CombinedAppState {
     ctx:          GpuContext,
     cloth:        Cloth,
     cube_cloth:   Cloth,
-    light:        Light,
+    light:        Lighting,
     camera:       Camera,
     cloth_sim:    ClothSim,
     rigid_sim:    RigidSimCore,
@@ -158,7 +159,7 @@ struct CombinedAppState {
 struct ParticlePaperAppState {
     ctx:        GpuContext,
     cloth:      Cloth,
-    light:      Light,
+    light:      Lighting,
     camera:     Camera,
     sim:        ParticlePaperSim,
     #[cfg(feature = "gpu")]
@@ -268,6 +269,8 @@ pub async fn run_cloth(canvas_id: &str) -> Result<(), JsValue> {
         cloth.sync_from_sim(&sim.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
             cloth.render(ctx, &view, light, camera);
             frame.present();
         }
@@ -354,6 +357,9 @@ pub async fn run(canvas_id: &str) -> Result<(), JsValue> {
         }
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
+            cube_cloth.render_shadow(ctx, light);
             cloth.render(ctx, &view, light, camera);
             cube_cloth.render_over(ctx, &view, light, camera);
             frame.present();
@@ -388,7 +394,8 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
     let (window, canvas) = get_canvas(canvas_id)?;
     let resolution = PARAMS.with(|p| p.borrow().resolution as usize);
     let (ctx, light, camera) = build_basics(canvas.clone()).await?;
-    let cloth = Cloth::new(&ctx, resolution as u32, &light);
+    let mut cloth = Cloth::new(&ctx, resolution as u32, &light);
+    cloth.set_material(&ctx, Material::Paper);
     let mut sim = PaperSim::from_grid(resolution);
     sim.set_fold_map(central_vertical_fold(resolution));
 
@@ -416,7 +423,8 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
     let cp = CreasePattern::parse(cp_data).map_err(|e| JsValue::from_str(&e))?;
     let (sim, positions, faces, colors, edge_colors) =
         PaperSim::from_crease_pattern(&cp, resolution);
-    let cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
+    let mut cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
+    cloth.set_material(&ctx, Material::Paper);
 
     let state = Rc::new(RefCell::new(PaperAppState {
         ctx, cloth, light, camera, sim,
@@ -448,6 +456,8 @@ fn spawn_paper_loop(
         cloth.sync_from_sim(&sim.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
             cloth.render(ctx, &view, light, camera);
             frame.present();
         }
@@ -498,6 +508,8 @@ pub async fn run_rigid(canvas_id: &str) -> Result<(), JsValue> {
         cloth.upload(ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
             cloth.render(ctx, &view, light, camera);
             frame.present();
         }
@@ -588,6 +600,10 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
         cloth.sync_from_sim(&sim.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
+            if let Some(sc) = sphere_cloth.as_ref() { sc.render_shadow(ctx, light); }
+            if let Some(gc) = ground_cloth.as_ref() { gc.render_shadow(ctx, light); }
             cloth.render(ctx, &view, light, camera);
             if let Some(gc) = ground_cloth { gc.render_over(ctx, &view, light, camera); }
             if let Some(sc) = sphere_cloth { sc.render_over(ctx, &view, light, camera); }
@@ -606,7 +622,8 @@ pub async fn run_particle_paper(canvas_id: &str) -> Result<(), JsValue> {
     let (window, canvas) = get_canvas(canvas_id)?;
     let resolution = PARAMS.with(|p| p.borrow().resolution as usize);
     let (ctx, light, camera) = build_basics(canvas.clone()).await?;
-    let cloth = Cloth::new(&ctx, resolution as u32, &light);
+    let mut cloth = Cloth::new(&ctx, resolution as u32, &light);
+    cloth.set_material(&ctx, Material::Paper);
     let sim   = ParticlePaperSim::from_grid(resolution);
 
     #[cfg(feature = "gpu")]
@@ -641,7 +658,8 @@ pub async fn run_particle_paper_with_cp(canvas_id: &str, cp_data: &str) -> Resul
     let cp = CreasePattern::parse(cp_data).map_err(|e| JsValue::from_str(&e))?;
     let (sim, positions, faces, colors, edge_colors) =
         ParticlePaperSim::from_crease_pattern(&cp, resolution);
-    let cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
+    let mut cloth = Cloth::from_mesh(&ctx, positions, faces, colors, edge_colors, &light);
+    cloth.set_material(&ctx, Material::Paper);
 
     #[cfg(feature = "gpu")]
     let gpu_sim = crate::sim::ParticlePaperSimGpu::from_cpu(
@@ -697,6 +715,8 @@ fn spawn_particle_paper_loop(
         cloth.sync_from_sim(&sim.core.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
+            light.clear_shadow(ctx);
+            cloth.render_shadow(ctx, light);
             cloth.render(ctx, &view, light, camera);
             frame.present();
         }
@@ -822,14 +842,18 @@ pub fn set_paper_resolution(v: u32) {
             if let Ok(cp) = CreasePattern::parse(cp_data) {
                 let (sim, positions, faces, colors, edge_colors) =
                     PaperSim::from_crease_pattern(&cp, resolution);
-                s.cloth = Cloth::from_mesh(&s.ctx, positions, faces, colors, edge_colors, &s.light);
+                let mut new_cloth = Cloth::from_mesh(&s.ctx, positions, faces, colors, edge_colors, &s.light);
+                new_cloth.set_material(&s.ctx, Material::Paper);
+                s.cloth = new_cloth;
                 s.sim = sim;
                 s.resolution = resolution;
             }
         } else {
             let mut sim = PaperSim::from_grid(resolution);
             sim.set_fold_map(central_vertical_fold(resolution));
-            s.cloth = Cloth::new(&s.ctx, resolution as u32, &s.light);
+            let mut new_cloth = Cloth::new(&s.ctx, resolution as u32, &s.light);
+            new_cloth.set_material(&s.ctx, Material::Paper);
+            s.cloth = new_cloth;
             s.sim = sim;
             s.resolution = resolution;
         }
@@ -897,7 +921,9 @@ pub fn set_particle_paper_resolution(v: u32) {
             if let Ok(cp) = CreasePattern::parse(cp_data) {
                 let (sim, positions, faces, colors, edge_colors) =
                     ParticlePaperSim::from_crease_pattern(&cp, resolution);
-                s.cloth = Cloth::from_mesh(&s.ctx, positions, faces, colors, edge_colors, &s.light);
+                let mut new_cloth = Cloth::from_mesh(&s.ctx, positions, faces, colors, edge_colors, &s.light);
+                new_cloth.set_material(&s.ctx, Material::Paper);
+                s.cloth = new_cloth;
                 #[cfg(feature = "gpu")]
                 {
                     s.gpu_sim = crate::sim::ParticlePaperSimGpu::from_cpu(
@@ -909,7 +935,9 @@ pub fn set_particle_paper_resolution(v: u32) {
             }
         } else {
             let sim = ParticlePaperSim::from_grid(resolution);
-            s.cloth = Cloth::new(&s.ctx, resolution as u32, &s.light);
+            let mut new_cloth = Cloth::new(&s.ctx, resolution as u32, &s.light);
+            new_cloth.set_material(&s.ctx, Material::Paper);
+            s.cloth = new_cloth;
             #[cfg(feature = "gpu")]
             {
                 s.gpu_sim = crate::sim::ParticlePaperSimGpu::from_cpu(

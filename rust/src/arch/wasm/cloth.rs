@@ -3,9 +3,25 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use super::{camera::Camera, gpu::GpuContext, light::Light, pipeline::PipelineBuilder};
+use super::{camera::Camera, gpu::GpuContext, light::Lighting, pipeline::PipelineBuilder};
 use crate::sim::crease::CreaseType;
 use crate::sim::Positions;
+
+#[derive(Copy, Clone, Debug)]
+pub enum Material {
+    Cloth = 0,
+    Paper = 1,
+    Rigid = 2,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct MaterialUniform {
+    kind: u32,
+    _p0:  u32,
+    _p1:  u32,
+    _p2:  u32,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -46,11 +62,6 @@ impl WireframeVertex {
 }
 
 const WIREFRAME_SHADER: &str = r#"
-struct LightUniform {
-    position: vec3<f32>,
-}
-@group(0) @binding(0) var<uniform> light: LightUniform;
-
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position:  vec3<f32>,
@@ -77,8 +88,7 @@ fn vs_main(in: WireframeIn) -> WireframeOut {
 
 @fragment
 fn fs_main(in: WireframeOut) -> @location(0) vec4<f32> {
-    let dummy = light.position.x * 0.0;
-    return vec4<f32>(in.color + vec3<f32>(dummy, 0.0, 0.0), 1.0);
+    return vec4<f32>(in.color, 1.0);
 }
 "#;
 
@@ -93,19 +103,31 @@ struct VertexOutput {
     @builtin(position)              clip_position:  vec4<f32>,
     @location(0)                    world_position: vec3<f32>,
     @location(1)                    normal:         vec3<f32>,
-    @location(2)  @interpolate(flat)                  color:          vec3<f32>,
+    @location(2) @interpolate(flat) color:          vec3<f32>,
 }
 
-struct LightUniform {
-    position: vec3<f32>,
+struct Lights {
+    key_dir:    vec4<f32>,
+    key_color:  vec4<f32>,
+    fill_dir:   vec4<f32>,
+    fill_color: vec4<f32>,
+    rim_dir:    vec4<f32>,
+    rim_color:  vec4<f32>,
+    ambient:    vec4<f32>,
+    light_view_proj: mat4x4<f32>,
 }
-@group(0) @binding(0) var<uniform> light: LightUniform;
+@group(0) @binding(0) var<uniform> lights: Lights;
+@group(0) @binding(1) var shadow_map: texture_depth_2d;
+@group(0) @binding(2) var shadow_samp: sampler_comparison;
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position:  vec3<f32>,
 }
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
+
+struct Material { kind: u32, _p0: u32, _p1: u32, _p2: u32 }
+@group(2) @binding(0) var<uniform> material: Material;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -117,20 +139,95 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn shadow_factor(world_pos: vec3<f32>, n_dot_l: f32) -> f32 {
+    let lp = lights.light_view_proj * vec4<f32>(world_pos, 1.0);
+    let p  = lp.xyz / lp.w;
+    let uv_raw = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    let uv = clamp(uv_raw, vec2<f32>(0.0), vec2<f32>(1.0));
+    let bias = max(0.0025 * (1.0 - n_dot_l), 0.0006);
+    let ref_z = clamp(p.z - bias, 0.0, 1.0);
+
+    var acc = 0.0;
+    let ts = 1.0 / 2048.0;
+    for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+        for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+            let o = vec2<f32>(f32(dx), f32(dy)) * ts;
+            acc = acc + textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, ref_z);
+        }
+    }
+    let pcf = acc / 9.0;
+
+    // Outside the shadow frustum (or behind the far plane): no shadowing.
+    let in_bounds = f32(uv_raw.x >= 0.0 && uv_raw.x <= 1.0 &&
+                        uv_raw.y >= 0.0 && uv_raw.y <= 1.0 &&
+                        p.z >= 0.0 && p.z <= 1.0);
+    return mix(1.0, pcf, in_bounds);
+}
+
+fn brdf(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, lc: vec3<f32>, base: vec3<f32>, kind: u32) -> vec3<f32> {
+    let nl = max(dot(n, l), 0.0);
+    var diff = base * lc * nl;
+    var spec = vec3<f32>(0.0);
+    if (kind == 1u) {
+        // Paper: medium specular (matches prior behaviour).
+        let h = normalize(l + v);
+        let s = pow(max(dot(n, h), 0.0), 32.0) * 0.5;
+        spec = lc * s;
+    } else if (kind == 2u) {
+        // Rigid / marble: tight, strong specular.
+        let h = normalize(l + v);
+        let s = pow(max(dot(n, h), 0.0), 128.0) * 1.4;
+        spec = lc * s;
+    }
+    return diff + spec;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let light_dir = normalize(light.position - in.world_position);
-    let ambient = 0.45;
-    let diffuse       = max(dot(n, light_dir), 0.0);
+    let v = normalize(camera.position - in.world_position);
+    var n = normalize(in.normal);
+    if (dot(n, v) < 0.0) { n = -n; }
+    let base = in.color;
+    let kind = material.kind;
 
-    let view_dir = normalize(camera.position - in.world_position);
-    let half_dir = normalize(light_dir + view_dir);
-    let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.5;
+    let nl_key = max(dot(n, lights.key_dir.xyz), 0.0);
+    let sh = shadow_factor(in.world_position, nl_key);
 
-    let lit = in.color * (ambient + diffuse * 0.85);
-    // return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
-    return vec4<f32>(lit, 1.0);
+    var color = lights.ambient.rgb * base;
+    color = color + brdf(n, v, lights.key_dir.xyz,  lights.key_color.rgb,  base, kind) * sh;
+    color = color + brdf(n, v, lights.fill_dir.xyz, lights.fill_color.rgb, base, kind);
+
+    // Rim: silhouette-only soft highlight from behind.
+    let rim_n    = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    let rim_face = max(dot(n, lights.rim_dir.xyz), 0.0);
+    color = color + lights.rim_color.rgb * rim_n * rim_face * base;
+
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
+const SHADOW_SHADER: &str = r#"
+struct Lights {
+    key_dir:    vec4<f32>,
+    key_color:  vec4<f32>,
+    fill_dir:   vec4<f32>,
+    fill_color: vec4<f32>,
+    rim_dir:    vec4<f32>,
+    rim_color:  vec4<f32>,
+    ambient:    vec4<f32>,
+    light_view_proj: mat4x4<f32>,
+}
+@group(0) @binding(0) var<uniform> lights: Lights;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal:   vec3<f32>,
+    @location(2) color:    vec3<f32>,
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
+    return lights.light_view_proj * vec4<f32>(in.position, 1.0);
 }
 "#;
 
@@ -190,12 +287,44 @@ fn grid_color(row: usize, col: usize) -> [f32; 3] {
     if (row + col) % 2 == 0 { [0.85, 0.85, 0.85] } else { [0.75, 0.75, 0.75] }
 }
 
+fn build_material_resources(
+    ctx: &GpuContext,
+    material: Material,
+) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let uniform = MaterialUniform { kind: material as u32, _p0: 0, _p1: 0, _p2: 0 };
+    let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Material UB"),
+        contents: bytemuck::bytes_of(&uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Material BGL"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Material BG"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+    });
+    (buffer, bgl, bg)
+}
+
 pub struct Cloth {
     pub resolution: u32,
     pub positions: Vec<[f32; 3]>,
     pub faces: Option<Vec<[u32; 3]>>,
     pub colors: Option<Vec<[f32; 3]>>,
     pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -204,10 +333,13 @@ pub struct Cloth {
     wireframe_vertex_count: u32,
     wireframe_edges: Vec<(u32, u32, [f32; 3])>,
     pub wireframe_enabled: bool,
+    material_buffer: wgpu::Buffer,
+    material_bind_group: wgpu::BindGroup,
+    pub material: Material,
 }
 
 impl Cloth {
-    pub fn new(ctx: &GpuContext, resolution: u32, light: &Light) -> Self {
+    pub fn new(ctx: &GpuContext, resolution: u32, lighting: &Lighting) -> Self {
         let n = resolution as usize;
         assert!(n >= 2, "resolution must be at least 2");
 
@@ -253,27 +385,20 @@ impl Cloth {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let camera_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Cloth Camera BGL placeholder"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let camera_bgl = make_camera_bgl(ctx);
+        let (material_buffer, material_bgl, material_bind_group) =
+            build_material_resources(ctx, Material::Cloth);
 
         let pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Cloth Pipeline")
             .shader(SHADER)
-            .bind_group_layout(&light.bind_group_layout)
+            .bind_group_layout(&lighting.bind_group_layout)
             .bind_group_layout(&camera_bgl)
+            .bind_group_layout(&material_bgl)
             .vertex_layout(Vertex::LAYOUT)
             .build();
+
+        let shadow_pipeline = build_shadow_pipeline(ctx, &lighting.shadow_bind_group_layout);
 
         let gray = [0.2f32, 0.2, 0.2];
         let mut wireframe_edges: Vec<(u32, u32, [f32; 3])> = Vec::new();
@@ -305,7 +430,7 @@ impl Cloth {
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
-            .bind_group_layout(&light.bind_group_layout)
+            .bind_group_layout(&dummy_group0_bgl(ctx))
             .bind_group_layout(&camera_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
@@ -313,10 +438,11 @@ impl Cloth {
 
         Self {
             resolution, positions, faces: None, colors: None,
-            pipeline, vertex_buffer, index_buffer, index_count,
+            pipeline, shadow_pipeline, vertex_buffer, index_buffer, index_count,
             wireframe_pipeline, wireframe_vertex_buffer, wireframe_vertex_count,
             wireframe_edges,
             wireframe_enabled: false,
+            material_buffer, material_bind_group, material: Material::Cloth,
         }
     }
 
@@ -326,7 +452,7 @@ impl Cloth {
         faces: Vec<[u32; 3]>,
         colors: Vec<[f32; 3]>,
         edge_types: HashMap<(u32, u32), CreaseType>,
-        light: &Light,
+        lighting: &Lighting,
     ) -> Self {
         let num_verts = positions.len();
         let normals = compute_mesh_normals(&positions, &faces);
@@ -354,27 +480,20 @@ impl Cloth {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let camera_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Mesh Camera BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let camera_bgl = make_camera_bgl(ctx);
+        let (material_buffer, material_bgl, material_bind_group) =
+            build_material_resources(ctx, Material::Cloth);
 
         let pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Mesh Pipeline")
             .shader(SHADER)
-            .bind_group_layout(&light.bind_group_layout)
+            .bind_group_layout(&lighting.bind_group_layout)
             .bind_group_layout(&camera_bgl)
+            .bind_group_layout(&material_bgl)
             .vertex_layout(Vertex::LAYOUT)
             .build();
+
+        let shadow_pipeline = build_shadow_pipeline(ctx, &lighting.shadow_bind_group_layout);
 
         let mut edge_set = std::collections::HashSet::new();
         for &[i0, i1, i2] in &faces {
@@ -415,7 +534,7 @@ impl Cloth {
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
-            .bind_group_layout(&light.bind_group_layout)
+            .bind_group_layout(&dummy_group0_bgl(ctx))
             .bind_group_layout(&camera_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
@@ -427,6 +546,7 @@ impl Cloth {
             faces: Some(faces),
             colors: Some(colors),
             pipeline,
+            shadow_pipeline,
             vertex_buffer,
             index_buffer,
             index_count,
@@ -435,7 +555,14 @@ impl Cloth {
             wireframe_vertex_count,
             wireframe_edges,
             wireframe_enabled: false,
+            material_buffer, material_bind_group, material: Material::Cloth,
         }
+    }
+
+    pub fn set_material(&mut self, ctx: &GpuContext, m: Material) {
+        self.material = m;
+        let u = MaterialUniform { kind: m as u32, _p0: 0, _p1: 0, _p2: 0 };
+        ctx.queue.write_buffer(&self.material_buffer, 0, bytemuck::bytes_of(&u));
     }
 
     /// Sync positions from simulation and upload to GPU.
@@ -482,15 +609,42 @@ impl Cloth {
         }
     }
 
-    pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
-        self.render_impl(ctx, view, light, camera, true);
+    /// Render this mesh into the lighting's shadow map (depth-only pass).
+    pub fn render_shadow(&self, ctx: &GpuContext, lighting: &Lighting) {
+        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Shadow Encoder"),
+        });
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &lighting.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rpass.set_pipeline(&self.shadow_pipeline);
+            rpass.set_bind_group(0, &lighting.shadow_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
     }
 
-    pub fn render_over(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera) {
-        self.render_impl(ctx, view, light, camera, false);
+    pub fn render(&self, ctx: &GpuContext, view: &wgpu::TextureView, lighting: &Lighting, camera: &Camera) {
+        self.render_impl(ctx, view, lighting, camera, true);
     }
 
-    fn render_impl(&self, ctx: &GpuContext, view: &wgpu::TextureView, light: &Light, camera: &Camera, clear: bool) {
+    pub fn render_over(&self, ctx: &GpuContext, view: &wgpu::TextureView, lighting: &Lighting, camera: &Camera) {
+        self.render_impl(ctx, view, lighting, camera, false);
+    }
+
+    fn render_impl(&self, ctx: &GpuContext, view: &wgpu::TextureView, lighting: &Lighting, camera: &Camera, clear: bool) {
         let color_load = if clear {
             wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 })
         } else {
@@ -520,15 +674,15 @@ impl Cloth {
                 multiview_mask: None,
             });
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &light.bind_group, &[]);
+            rpass.set_bind_group(0, &lighting.bind_group, &[]);
             rpass.set_bind_group(1, &camera.bind_group, &[]);
+            rpass.set_bind_group(2, &self.material_bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..self.index_count, 0, 0..1);
 
             if self.wireframe_enabled {
                 rpass.set_pipeline(&self.wireframe_pipeline);
-                rpass.set_bind_group(0, &light.bind_group, &[]);
                 rpass.set_bind_group(1, &camera.bind_group, &[]);
                 rpass.set_vertex_buffer(0, self.wireframe_vertex_buffer.slice(..));
                 rpass.draw(0..self.wireframe_vertex_count, 0..1);
@@ -536,4 +690,71 @@ impl Cloth {
         }
         ctx.queue.submit(Some(encoder.finish()));
     }
+}
+
+fn make_camera_bgl(ctx: &GpuContext) -> wgpu::BindGroupLayout {
+    ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Cloth Camera BGL placeholder"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Empty-but-not-quite layout for the wireframe pipeline @group(0). We don't
+/// bind anything to it, so the shader simply doesn't reference group 0.
+fn dummy_group0_bgl(ctx: &GpuContext) -> wgpu::BindGroupLayout {
+    ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Wireframe Empty BGL"),
+        entries: &[],
+    })
+}
+
+fn build_shadow_pipeline(ctx: &GpuContext, shadow_bgl: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Shadow Shader"),
+        source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+    });
+    let layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Shadow Pipeline Layout"),
+        bind_group_layouts: &[Some(shadow_bgl)],
+        immediate_size: 0,
+    });
+    ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Shadow Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            buffers: &[Vertex::LAYOUT],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        cache: None,
+        multiview_mask: None,
+    })
 }

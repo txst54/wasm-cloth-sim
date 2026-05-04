@@ -3,17 +3,14 @@
 
 use std::collections::HashMap;
 
-use super::cloth::Cloth;
+use super::cloth::{Cloth, Material};
 use super::gpu::GpuContext;
-use super::light::Light;
+use super::light::Lighting;
 
-// ── Light ─────────────────────────────────────────────────────────────────────
+// ── Lighting ──────────────────────────────────────────────────────────────────
 
-/// Default key-light world-space position used by every WASM scene.
-pub const LIGHT_POS: [f32; 3] = [2.0, 0.0, 0.5];
-
-pub fn make_light(ctx: &GpuContext) -> Light {
-    Light::new(ctx, LIGHT_POS)
+pub fn make_light(ctx: &GpuContext) -> Lighting {
+    Lighting::new(ctx)
 }
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -49,15 +46,17 @@ pub const CUBE_FACES: [[u32; 3]; 12] = [
 ];
 
 /// Build a render-only cloth mesh for a wood-coloured cube.
-pub fn cube_cloth(ctx: &GpuContext, light: &Light) -> Cloth {
-    Cloth::from_mesh(
+pub fn cube_cloth(ctx: &GpuContext, light: &Lighting) -> Cloth {
+    let mut c = Cloth::from_mesh(
         ctx,
         CUBE_VERTS.to_vec(),
         CUBE_FACES.to_vec(),
         vec![color::SPHERE; CUBE_VERTS.len()],
         HashMap::new(),
         light,
-    )
+    );
+    c.set_material(ctx, Material::Rigid);
+    c
 }
 
 // ── Sphere (subdivided octahedron) ────────────────────────────────────────────
@@ -112,16 +111,18 @@ pub fn octa_sphere_mesh(center: [f32; 3], radius: f32) -> (Vec<[f32; 3]>, Vec<[u
     (world_verts, faces)
 }
 
-pub fn sphere_cloth(ctx: &GpuContext, light: &Light, center: [f32; 3], radius: f32) -> Cloth {
+pub fn sphere_cloth(ctx: &GpuContext, light: &Lighting, center: [f32; 3], radius: f32) -> Cloth {
     let (verts, faces) = octa_sphere_mesh(center, radius);
     let colors = vec![color::SPHERE; faces.len()];
-    Cloth::from_mesh(ctx, verts, faces, colors, HashMap::new(), light)
+    let mut c = Cloth::from_mesh(ctx, verts, faces, colors, HashMap::new(), light);
+    c.set_material(ctx, Material::Rigid);
+    c
 }
 
 // ── Ground plane ──────────────────────────────────────────────────────────────
 
 /// Large axis-aligned ground quad at `y`, `2*half_extent` wide.
-pub fn ground_cloth(ctx: &GpuContext, light: &Light, y: f32, half_extent: f32) -> Cloth {
+pub fn ground_cloth(ctx: &GpuContext, light: &Lighting, y: f32, half_extent: f32) -> Cloth {
     let s = half_extent;
     let verts = vec![
         [-s, y, -s], [ s, y, -s],

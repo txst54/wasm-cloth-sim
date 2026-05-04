@@ -12,7 +12,7 @@ pub mod fps;
 pub mod harness;
 
 pub use gpu::GpuContext;
-pub use light::Light;
+pub use light::Lighting;
 pub use camera::Camera;
-pub use cloth::Cloth;
+pub use cloth::{Cloth, Material};
 pub use harness::*;
