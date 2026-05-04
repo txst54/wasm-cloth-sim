@@ -93,7 +93,7 @@ struct VertexOutput {
     @builtin(position)              clip_position:  vec4<f32>,
     @location(0)                    world_position: vec3<f32>,
     @location(1)                    normal:         vec3<f32>,
-    @location(2)                    color:          vec3<f32>,
+    @location(2)  @interpolate(flat)                  color:          vec3<f32>,
 }
 
 struct LightUniform {
@@ -121,15 +121,16 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let light_dir = normalize(light.position - in.world_position);
-    let ambient = 0.15;
+    let ambient = 0.45;
     let diffuse       = max(dot(n, light_dir), 0.0);
 
     let view_dir = normalize(camera.position - in.world_position);
     let half_dir = normalize(light_dir + view_dir);
     let specular = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.5;
 
-    let lit = in.color * (ambient + diffuse * 0.85) + vec3<f32>(specular);
-    return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
+    let lit = in.color * (ambient + diffuse * 0.85);
+    // return vec4<f32>((n.x + 1.0) / 2.0, (n.y + 1.0) / 2.0, (n.z + 1.0) / 2.0, 1.0);
+    return vec4<f32>(lit, 1.0);
 }
 "#;
 
@@ -186,7 +187,7 @@ fn compute_mesh_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32;
 }
 
 fn grid_color(row: usize, col: usize) -> [f32; 3] {
-    if (row + col) % 2 == 0 { [0.75, 0.88, 1.00] } else { [0.75, 0.88, 1.00] }
+    if (row + col) % 2 == 0 { [0.85, 0.85, 0.85] } else { [0.35, 0.35, 0.35] }
 }
 
 pub struct Cloth {

@@ -6,6 +6,9 @@ pub mod pipeline;
 pub mod light;
 pub mod camera;
 pub mod cloth;
+pub mod scene;
+pub mod input;
+pub mod fps;
 pub mod harness;
 
 pub use gpu::GpuContext;

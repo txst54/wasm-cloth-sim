@@ -172,15 +172,15 @@ impl PaperSim {
         let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
 
         // Color vertices that are part of fold edges
-        for (&(a, b), &crease_type) in &all_fold_edges {
-            let color = match crease_type {
-                CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
-                CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
-                CreaseType::Boundary => [0.85, 0.85, 0.85],
-            };
-            vertex_colors[a as usize] = color;
-            vertex_colors[b as usize] = color;
-        }
+        // for (&(a, b), &crease_type) in &all_fold_edges {
+        //     let color = match crease_type {
+        //         CreaseType::Mountain => [1.0, 0.6, 0.6],  // reddish
+        //         CreaseType::Valley => [0.6, 0.6, 1.0],    // bluish
+        //         CreaseType::Boundary => [0.85, 0.85, 0.85],
+        //     };
+        //     vertex_colors[a as usize] = color;
+        //     vertex_colors[b as usize] = color;
+        // }
 
         // Build crease-bend triples from chains: for each consecutive (A,B,C),
         // B is the interior vertex that should stay on line AC.
