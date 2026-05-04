@@ -12,6 +12,7 @@ use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent, TouchEvent};
 use nalgebra as na;
 
 use super::platform::init_platform;
+use crate::platform_context::PlatformContext;
 use super::camera::Camera;
 use super::cloth::Cloth;
 use super::gpu::GpuContext;
@@ -862,6 +863,7 @@ pub async fn run_paper(canvas_id: &str) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
+    init_platform();
     let window = web_sys::window().unwrap();
     let canvas = window
         .document().unwrap()
@@ -1014,6 +1016,7 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
     let loop_fn: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let loop_fn_inner = loop_fn.clone();
     let state_inner = state.clone();
+    let mut frame: usize = 0;
 
     *loop_fn.borrow_mut() = Some(Closure::wrap(Box::new(move || {
         let mut s = state_inner.borrow_mut();
@@ -1034,6 +1037,8 @@ pub async fn run_paper_with_cp(canvas_id: &str, cp_data: &str) -> Result<(), JsV
         if keys[7] { for i in 0..3 { camera.target[i] -= fwd[i]   * MOV_SPEED; } }
         if keys.iter().any(|&k| k) { camera.update(&ctx.queue); }
 
+        PlatformContext::set_step(frame);
+        frame += 1;
         sim.step(&params.borrow());
         cloth.sync_from_sim(&sim.q, ctx);
 
@@ -1106,7 +1111,7 @@ pub fn set_paper_fold_speed(rads_per_sec: f64) {
 /// Mountain and valley folds fold in opposite directions.
 #[wasm_bindgen]
 pub fn set_paper_fold_angle(degrees: f64) {
-    let desired_dihedral = degrees as f32;
+    let desired_dihedral = (degrees as f32).to_radians();
     PAPER_APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
@@ -2132,7 +2137,7 @@ pub fn set_particle_paper_resolution(v: u32) {
 
 #[wasm_bindgen]
 pub fn set_particle_paper_fold_angle(degrees: f64) {
-    let d = degrees as f32;
+    let d = (degrees as f32).to_radians();
     PARTICLE_PAPER_APP_STATE.with(|a| {
         if let Some(state) = a.borrow().as_ref() {
             let mut s = state.borrow_mut();
