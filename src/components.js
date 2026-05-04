@@ -238,7 +238,6 @@ export const CREASE_PATTERNS = [
   'miura_ori.cp',
   'waterbomb.cp',
   'waterbomb_tess.cp',
-  'yaccho.cp',
   'hex_torso.cp'
 ]
 
