@@ -127,7 +127,7 @@ pub fn ground_cloth(ctx: &GpuContext, light: &Light, y: f32, half_extent: f32) -
         [-s, y, -s], [ s, y, -s],
         [ s, y,  s], [-s, y,  s],
     ];
-    let faces = vec![[0u32, 1, 2], [0, 2, 3]];
+    let faces = vec![[0u32, 2, 1], [0, 3, 2]];
     let colors = vec![color::SPHERE; 2];
     Cloth::from_mesh(ctx, verts, faces, colors, HashMap::new(), light)
 }

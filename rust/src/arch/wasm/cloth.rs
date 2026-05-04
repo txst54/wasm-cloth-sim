@@ -187,7 +187,7 @@ fn compute_mesh_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32;
 }
 
 fn grid_color(row: usize, col: usize) -> [f32; 3] {
-    if (row + col) % 2 == 0 { [0.85, 0.85, 0.85] } else { [0.35, 0.35, 0.35] }
+    if (row + col) % 2 == 0 { [0.85, 0.85, 0.85] } else { [0.75, 0.75, 0.75] }
 }
 
 pub struct Cloth {

@@ -121,15 +121,15 @@ impl ParticlePaperSim {
 
         // Vertex colors.
         let mut vertex_colors = vec![[0.85f32, 0.85, 0.85]; positions.len()];
-        for (&(a, b), &crease_type) in &all_fold_edges {
-            let color = match crease_type {
-                CreaseType::Mountain => [1.0, 0.6, 0.6],
-                CreaseType::Valley   => [0.6, 0.6, 1.0],
-                CreaseType::Boundary => [0.85, 0.85, 0.85],
-            };
-            vertex_colors[a as usize] = color;
-            vertex_colors[b as usize] = color;
-        }
+        // for (&(a, b), &crease_type) in &all_fold_edges {
+        //     let color = match crease_type {
+        //         CreaseType::Mountain => [1.0, 0.6, 0.6],
+        //         CreaseType::Valley   => [0.6, 0.6, 1.0],
+        //         CreaseType::Boundary => [0.85, 0.85, 0.85],
+        //     };
+        //     vertex_colors[a as usize] = color;
+        //     vertex_colors[b as usize] = color;
+        // }
 
         // Skip set for cloth bending: any fold edge that has a corresponding diamond.
         let skip_bend: HashSet<(u32, u32)> = all_fold_edges.keys()
