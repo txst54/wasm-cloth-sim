@@ -43,7 +43,7 @@ const P = {
   damping:  new Param({ label: 'damping',   min: 0, max: 0.5, step: 0.001, value: 0.005, onChange: set_damping }),
   timeStep: new Param({ label: 'time step', min: 0.0001, max: 0.05, step: 0.0001, value: 0.0005, onChange: set_time_step }),
   iters:    new Param({ label: 'iterations', min: 1, max: 30, step: 1, value: 1, asInt: true, onChange: set_constraint_iters }),
-  substeps: new Param({ label: 'substeps',   min: 1, max: 80, step: 1, value: 20, asInt: true, onChange: set_num_substeps }),
+  substeps: new Param({ label: 'substeps',   min: 1, max: 80, step: 1, value: 8, asInt: true, onChange: set_num_substeps }),
 
   gravityG: new Param({ label: 'g', min: -20, max: 0, step: 0.1, value: -9.8, onChange: set_gravity_g }),
 
