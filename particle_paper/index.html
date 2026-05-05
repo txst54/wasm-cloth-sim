@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>psim — particle paper folding</title>
+    <meta name="description" content="Particle-based origami simulation. Folds a paper crease pattern using particle dynamics and per-crease fold angles, visualized as a point cloud on the GPU via WebGPU and Rust/WASM." />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="psim — particle paper folding" />
+    <meta property="og:description" content="Particle-based origami simulation. Folds a paper crease pattern using particle dynamics and per-crease fold angles, visualized as a point cloud on the GPU via WebGPU and Rust/WASM." />
+    <meta property="og:image" content="/sphere.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="psim — particle paper folding" />
+    <meta name="twitter:description" content="Particle-based origami simulation. Folds a paper crease pattern using particle dynamics and per-crease fold angles, visualized as a point cloud on the GPU via WebGPU and Rust/WASM." />
+    <meta name="twitter:image" content="/sphere.png" />
+
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <canvas id="canvas" width="1920" height="1080"></canvas>
+    <script type="module" src="/src/particle_paper.js"></script>
+  </body>
+</html>

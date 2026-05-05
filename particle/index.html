@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>psim — particle cloth</title>
+    <meta name="description" content="Particle-based cloth simulation rendered as a point cloud. A lightweight variant of the XPBD cloth solver focused on particle dynamics, sphere collisions, and resolution scaling. Runs on WebGPU + Rust/WASM." />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="psim — particle cloth" />
+    <meta property="og:description" content="Particle-based cloth simulation rendered as a point cloud. A lightweight variant of the XPBD cloth solver focused on particle dynamics, sphere collisions, and resolution scaling. Runs on WebGPU + Rust/WASM." />
+    <meta property="og:image" content="/sphere.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="psim — particle cloth" />
+    <meta name="twitter:description" content="Particle-based cloth simulation rendered as a point cloud. A lightweight variant of the XPBD cloth solver focused on particle dynamics, sphere collisions, and resolution scaling. Runs on WebGPU + Rust/WASM." />
+    <meta name="twitter:image" content="/sphere.png" />
+
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <canvas id="canvas" width="1920" height="1080"></canvas>
+    <script type="module" src="/src/particle_cloth.js"></script>
+  </body>
+</html>
