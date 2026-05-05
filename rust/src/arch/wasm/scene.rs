@@ -75,7 +75,7 @@ pub fn octa_sphere_mesh(center: [f32; 3], radius: f32) -> (Vec<[f32; 3]>, Vec<[u
         [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5],
     ];
 
-    for _ in 0..3 {
+    for _ in 0..5 {
         let mut new_faces: Vec<[u32; 3]> = Vec::with_capacity(faces.len() * 4);
         let mut cache: HashMap<(u32, u32), u32> = HashMap::new();
         let mut midpoint = |a: u32, b: u32, verts: &mut Vec<[f32; 3]>| -> u32 {

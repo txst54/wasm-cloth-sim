@@ -4,21 +4,23 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>psim</title>
+    <title>psim — cloth simulation</title>
+    <meta name="description" content="Real-time GPU cloth simulation using XPBD with distance and dihedral bending constraints, self-collision, and interactive pulling. Runs in the browser via WebGPU and Rust/WASM." />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="psim — cloth simulation" />
+    <meta property="og:description" content="Real-time GPU cloth simulation using XPBD with distance and dihedral bending constraints, self-collision, and interactive pulling. Runs in the browser via WebGPU and Rust/WASM." />
+    <meta property="og:image" content="/favicon.svg" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="psim — cloth simulation" />
+    <meta name="twitter:description" content="Real-time GPU cloth simulation using XPBD with distance and dihedral bending constraints, self-collision, and interactive pulling. Runs in the browser via WebGPU and Rust/WASM." />
+    <meta name="twitter:image" content="/favicon.svg" />
+
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>
     <canvas id="canvas" width="1920" height="1080"></canvas>
-    <script type="module">
-      if (location.pathname.startsWith('/particle_paper')) {
-        import('/src/particle_paper.js')
-      } else if (location.pathname.startsWith('/paper')) {
-        import('/src/paper.js')
-      } else if (location.pathname.startsWith('/particle')) {
-        import('/src/particle_cloth.js')
-      } else {
-        import('/src/main.js')
-      }
-    </script>
+    <script type="module" src="/src/main.js"></script>
   </body>
 </html>

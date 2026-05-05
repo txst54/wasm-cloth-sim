@@ -100,25 +100,25 @@ function buildPanel() {
 
   panel.appendChild(Divider())
 
-  const sphereLabel = document.createElement('div')
-  sphereLabel.className = 'font-semibold text-white/90 mb-1'
-  sphereLabel.textContent = 'SDF sphere'
-  panel.appendChild(sphereLabel)
-
-  const sphereParam = (key, label, min, max) => new Param({
-    label, min, max, step: 0.01, value: sphere[key],
-    onChange: v => { sphere[key] = v; pushSphere() },
-  }).slider()
-
-  panel.appendChild(sphereParam('cx', 'cx', -1.0, 1.0))
-  panel.appendChild(sphereParam('cy', 'cy', -1.5, 1.0))
-  panel.appendChild(sphereParam('cz', 'cz', -1.0, 1.0))
-  panel.appendChild(new Param({
-    label: 'radius', min: 0.05, max: 0.9, step: 0.01, value: sphere.r,
-    onChange: v => { sphere.r = v; pushSphere() },
-  }).slider())
-
-  panel.appendChild(Divider())
+  // const sphereLabel = document.createElement('div')
+  // sphereLabel.className = 'font-semibold text-white/90 mb-1'
+  // sphereLabel.textContent = 'SDF sphere'
+  // panel.appendChild(sphereLabel)
+  //
+  // const sphereParam = (key, label, min, max) => new Param({
+  //   label, min, max, step: 0.01, value: sphere[key],
+  //   onChange: v => { sphere[key] = v; pushSphere() },
+  // }).slider()
+  //
+  // panel.appendChild(sphereParam('cx', 'cx', -1.0, 1.0))
+  // panel.appendChild(sphereParam('cy', 'cy', -1.5, 1.0))
+  // panel.appendChild(sphereParam('cz', 'cz', -1.0, 1.0))
+  // panel.appendChild(new Param({
+  //   label: 'radius', min: 0.05, max: 0.9, step: 0.01, value: sphere.r,
+  //   onChange: v => { sphere.r = v; pushSphere() },
+  // }).slider())
+  //
+  // panel.appendChild(Divider())
   panel.appendChild(CheckboxRow({
     label: 'pin (mouse drag)', checked: T.pin.enabled,
     onChange: v => { T.pin.enabled = v; T.pin.onChange(v) },

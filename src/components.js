@@ -199,19 +199,19 @@ export function ParamConstraintGroup({ label, toggle, params }) {
 
 export const SIMS = [
   { path: '/',                label: 'cloth' },
-  { path: '/paper',           label: 'paper' },
-  { path: '/particle',        label: 'particle cloth' },
-  { path: '/particle_paper',  label: 'particle paper' },
+  { path: '/paper/',           label: 'paper' },
+  { path: '/particle/',        label: 'particle cloth' },
+  { path: '/particle_paper/',  label: 'particle paper' },
 ]
 
 /** NavPanel — fixed top-right links to the other simulations. */
 export function NavPanel() {
   const here = location.pathname
   const isCurrent = (p) => {
-    if (p === '/')               return here === '/' || (!here.startsWith('/paper') && !here.startsWith('/particle'))
-    if (p === '/particle_paper') return here.startsWith('/particle_paper')
-    if (p === '/particle')       return here.startsWith('/particle') && !here.startsWith('/particle_paper')
-    if (p === '/paper')          return here.startsWith('/paper')
+    if (p === '/')               return here === '/' || (!here.startsWith('/paper/') && !here.startsWith('/particle/'))
+    if (p === '/particle_paper/') return here.startsWith('/particle_paper/')
+    if (p === '/particle/')       return here.startsWith('/particle/') && !here.startsWith('/particle_paper/')
+    if (p === '/paper/')          return here.startsWith('/paper/')
     return false
   }
 

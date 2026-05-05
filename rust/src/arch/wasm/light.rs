@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 
 use super::gpu::GpuContext;
 
-pub const SHADOW_SIZE: u32 = 2048;
+pub const SHADOW_SIZE: u32 = 4096;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]

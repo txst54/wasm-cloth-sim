@@ -244,15 +244,18 @@ impl CreasePattern {
             let len = (dx*dx + dy*dy).sqrt();
             if len < 1e-10 { continue; }
 
-            let num_points = ((len / crease_spacing).ceil() as usize).max(1);
+            // Sample crease at every grid-line crossing (plus endpoints), so chain
+            // vertices align with grid topology and the CDT subdivides crossed cells
+            // symmetrically. This avoids the alternating-diagonal zig-zag that
+            // arises when chain vertices land at fractional positions inside cells.
+            let crossings = crease_grid_crossings(p1, p2, grid_res, snap_eps);
             let mut chain_indices: Vec<usize> = Vec::new();
 
-            for i in 0..=num_points {
-                let t = i as f64 / num_points as f64;
-                let x = p1[0] + t * dx;
-                let y = p1[1] + t * dy;
-                if x >= -0.9 && x <= 0.9 && y >= -0.9 && y <= 0.9 {
-                    let idx = add_vertex(&mut unique_verts, [x, y]);
+            for pt in crossings {
+                if pt[0] >= -0.9 - snap_eps && pt[0] <= 0.9 + snap_eps
+                    && pt[1] >= -0.9 - snap_eps && pt[1] <= 0.9 + snap_eps
+                {
+                    let idx = add_vertex(&mut unique_verts, pt);
                     if chain_indices.is_empty() || *chain_indices.last().unwrap() != idx {
                         chain_indices.push(idx);
                     }
@@ -870,6 +873,75 @@ fn point_to_segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let px = p[0] - proj_x;
     let py = p[1] - proj_y;
     (px*px + py*py).sqrt()
+}
+
+/// Sample a crease segment at every point where it crosses a grid line, plus
+/// the two endpoints. Grid lines are `x = -0.9 + col * (1.8/(grid_res-1))` for
+/// `col ∈ 0..grid_res`, and the analogous horizontal family.
+///
+/// Returned points are sorted by parameter `t ∈ [0, 1]` along `p1 → p2` and
+/// deduplicated within `eps` (so a crease passing exactly through a grid
+/// vertex yields one shared chain vertex, not two).
+///
+/// For axis-aligned creases the parallel family contributes nothing, so the
+/// output reduces to endpoints + perpendicular-line crossings.
+fn crease_grid_crossings(
+    p1: [f64; 2],
+    p2: [f64; 2],
+    grid_res: usize,
+    eps: f64,
+) -> Vec<[f64; 2]> {
+    let dx = p2[0] - p1[0];
+    let dy = p2[1] - p1[1];
+    let len_sq = dx*dx + dy*dy;
+    if len_sq < 1e-20 {
+        return vec![p1];
+    }
+
+    // Collect parameter values t in [0, 1] where the segment hits a grid line.
+    let mut ts: Vec<f64> = Vec::new();
+    ts.push(0.0);
+    ts.push(1.0);
+
+    if grid_res >= 2 {
+        let spacing = 1.8 / (grid_res - 1) as f64;
+
+        // Vertical grid lines x = -0.9 + col*spacing. Only meaningful if dx != 0.
+        if dx.abs() > 1e-12 {
+            for col in 0..grid_res {
+                let gx = -0.9 + col as f64 * spacing;
+                let t = (gx - p1[0]) / dx;
+                if t > eps && t < 1.0 - eps {
+                    ts.push(t);
+                }
+            }
+        }
+
+        // Horizontal grid lines y = -0.9 + row*spacing. Only meaningful if dy != 0.
+        if dy.abs() > 1e-12 {
+            for row in 0..grid_res {
+                let gy = -0.9 + row as f64 * spacing;
+                let t = (gy - p1[1]) / dy;
+                if t > eps && t < 1.0 - eps {
+                    ts.push(t);
+                }
+            }
+        }
+    }
+
+    ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Dedup by parameter (within eps along the segment).
+    let len = len_sq.sqrt();
+    let t_eps = eps / len.max(1e-12);
+    let mut out: Vec<[f64; 2]> = Vec::with_capacity(ts.len());
+    let mut last_t: f64 = -1.0;
+    for t in ts {
+        if t - last_t < t_eps { continue; }
+        out.push([p1[0] + t * dx, p1[1] + t * dy]);
+        last_t = t;
+    }
+    out
 }
 
 #[cfg(test)]

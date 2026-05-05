@@ -142,7 +142,7 @@ init().then(async () => {
   applyAllInitParams()
 
   try {
-    const file = `assets/${INITIAL_CP}`
+    const file = `../assets/${INITIAL_CP}`
     const cpResponse = await fetch(file)
     if (cpResponse.ok) {
       const cpData = await cpResponse.text()

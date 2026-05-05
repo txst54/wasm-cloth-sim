@@ -1,6 +1,20 @@
 use wasm_bindgen::JsValue;
 use web_sys::HtmlCanvasElement;
 
+fn alert(msg: &str) {
+    if let Some(win) = web_sys::window() {
+        let _ = win.alert_with_message(msg);
+    }
+    web_sys::console::error_1(&JsValue::from_str(msg));
+}
+
+fn webgpu_supported() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w.navigator(), &JsValue::from_str("gpu")).ok())
+        .map(|v| !v.is_undefined() && !v.is_null())
+        .unwrap_or(false)
+}
+
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -28,13 +42,25 @@ impl GpuContext {
         let width = canvas.width();
         let height = canvas.height();
 
+        if !webgpu_supported() {
+            let msg = "WebGPU is not available in this browser. \
+                       Please use a recent version of Chrome, Edge, or Firefox Nightly \
+                       on a system with a supported GPU.";
+            alert(msg);
+            return Err(JsValue::from_str(msg));
+        }
+
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::BROWSER_WEBGPU;
         let instance = wgpu::Instance::new(desc);
 
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(|e| {
+                let msg = format!("Failed to create WebGPU surface: {e}");
+                alert(&msg);
+                JsValue::from_str(&msg)
+            })?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -43,7 +69,25 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(|e| {
+                let msg = format!(
+                    "No compatible GPU adapter found ({e}). \
+                     This simulation requires a system with a WebGPU-capable GPU."
+                );
+                alert(&msg);
+                JsValue::from_str(&msg)
+            })?;
+
+        let info = adapter.get_info();
+        if matches!(info.device_type, wgpu::DeviceType::Cpu) {
+            let msg = format!(
+                "Only a software (CPU) GPU adapter is available ({} — {}). \
+                 Performance will be unusably slow. \
+                 Please run this on a system with a discrete or integrated GPU.",
+                info.name, info.backend.to_str()
+            );
+            alert(&msg);
+        }
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -56,7 +100,14 @@ impl GpuContext {
                 ..Default::default()
             })
             .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(|e| {
+                let msg = format!(
+                    "GPU does not meet the minimum requirements for this simulation \
+                     (need max_storage_buffers_per_shader_stage >= 16): {e}"
+                );
+                alert(&msg);
+                JsValue::from_str(&msg)
+            })?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.first().copied()

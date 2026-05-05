@@ -148,7 +148,7 @@ fn shadow_factor(world_pos: vec3<f32>, n_dot_l: f32) -> f32 {
     let ref_z = clamp(p.z - bias, 0.0, 1.0);
 
     var acc = 0.0;
-    let ts = 1.0 / 2048.0;
+    let ts = 1.0 / 4096.0;
     for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
         for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
             let o = vec2<f32>(f32(dx), f32(dy)) * ts;
@@ -168,12 +168,13 @@ fn brdf(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, lc: vec3<f32>, base: vec3<f32>
     let nl = max(dot(n, l), 0.0);
     var diff = base * lc * nl;
     var spec = vec3<f32>(0.0);
-    if (kind == 1u) {
-        // Paper: medium specular (matches prior behaviour).
-        let h = normalize(l + v);
-        let s = pow(max(dot(n, h), 0.0), 32.0) * 0.5;
-        spec = lc * s;
-    } else if (kind == 2u) {
+    // if (kind == 1u) {
+    //     // Paper: medium specular (matches prior behaviour).
+    //     let h = normalize(l + v);
+    //     let s = pow(max(dot(n, h), 0.0), 32.0) * 0.5;
+    //     spec = lc * s;
+    // } else
+    if (kind == 2u) {
         // Rigid / marble: tight, strong specular.
         let h = normalize(l + v);
         let s = pow(max(dot(n, h), 0.0), 128.0) * 1.4;
@@ -185,13 +186,17 @@ fn brdf(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, lc: vec3<f32>, base: vec3<f32>
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let v = normalize(camera.position - in.world_position);
-    var n = normalize(in.normal);
+    let n_geo = normalize(in.normal);
+    var n = n_geo;
     if (dot(n, v) < 0.0) { n = -n; }
     let base = in.color;
     let kind = material.kind;
 
-    let nl_key = max(dot(n, lights.key_dir.xyz), 0.0);
-    let sh = shadow_factor(in.world_position, nl_key);
+    // Shadow bias must be camera-independent: use |n_geo · l|, not the
+    // view-flipped normal, otherwise the bias (and thus the shadow edge)
+    // shifts as the camera orbits.
+    let nl_key_geo = abs(dot(n_geo, lights.key_dir.xyz));
+    let sh = shadow_factor(in.world_position, nl_key_geo);
 
     var color = lights.ambient.rgb * base;
     color = color + brdf(n, v, lights.key_dir.xyz,  lights.key_color.rgb,  base, kind) * sh;
@@ -269,18 +274,49 @@ fn compute_vertex_normals(positions: &[[f32; 3]], n: usize) -> Vec<[f32; 3]> {
     normals.into_iter().map(normalize).collect()
 }
 
+// Angle-weighted vertex normals (Max 1999). Each face contributes its UNIT
+// normal scaled by the interior angle the face subtends at the vertex. This
+// removes area bias — without it, irregular CDT strips along creases produce
+// alternating bright/dark stripes because the largest neighbor dominates each
+// on-crease vertex's normal.
 fn compute_mesh_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; positions.len()];
     for &[i0, i1, i2] in faces {
         let p0 = positions[i0 as usize];
         let p1 = positions[i1 as usize];
         let p2 = positions[i2 as usize];
-        let fn_vec = cross(sub(p1, p0), sub(p2, p0));
-        normals[i0 as usize] = add(normals[i0 as usize], fn_vec);
-        normals[i1 as usize] = add(normals[i1 as usize], fn_vec);
-        normals[i2 as usize] = add(normals[i2 as usize], fn_vec);
+
+        let e01 = sub(p1, p0);
+        let e02 = sub(p2, p0);
+        let face_n = normalize(cross(e01, e02));
+
+        let e10 = sub(p0, p1);
+        let e12 = sub(p2, p1);
+        let e20 = sub(p0, p2);
+        let e21 = sub(p1, p2);
+
+        let a0 = angle_between(e01, e02);
+        let a1 = angle_between(e10, e12);
+        let a2 = angle_between(e20, e21);
+
+        let w0 = [face_n[0] * a0, face_n[1] * a0, face_n[2] * a0];
+        let w1 = [face_n[0] * a1, face_n[1] * a1, face_n[2] * a1];
+        let w2 = [face_n[0] * a2, face_n[1] * a2, face_n[2] * a2];
+
+        normals[i0 as usize] = add(normals[i0 as usize], w0);
+        normals[i1 as usize] = add(normals[i1 as usize], w1);
+        normals[i2 as usize] = add(normals[i2 as usize], w2);
     }
     normals.into_iter().map(normalize).collect()
+}
+
+fn angle_between(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let la = (a[0]*a[0] + a[1]*a[1] + a[2]*a[2]).sqrt();
+    let lb = (b[0]*b[0] + b[1]*b[1] + b[2]*b[2]).sqrt();
+    let denom = la * lb;
+    if denom < 1e-12 { return 0.0; }
+    let c = ((a[0]*b[0] + a[1]*b[1] + a[2]*b[2]) / denom).clamp(-1.0, 1.0);
+    c.acos()
 }
 
 fn grid_color(row: usize, col: usize) -> [f32; 3] {
