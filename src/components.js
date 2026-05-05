@@ -265,7 +265,7 @@ export function CreasePatternDropdown({ initial, onLoad }) {
     sel.appendChild(opt)
   }
   sel.addEventListener('change', async () => {
-    const file = `assets/${sel.value}`
+    const file = `../assets/${sel.value}`
     try {
       const r = await fetch(file)
       if (!r.ok) throw new Error(`fetch ${file} -> ${r.status}`)
