@@ -119,6 +119,28 @@ pub fn sphere_cloth(ctx: &GpuContext, light: &Lighting, center: [f32; 3], radius
     c
 }
 
+// ── Mesh from OBJ ─────────────────────────────────────────────────────────────
+
+/// Build a render-only cloth from an arbitrary triangle mesh. Used for the
+/// head obstacle so the cloth has something visible to drape over.
+pub fn mesh_cloth(
+    ctx: &GpuContext,
+    light: &Lighting,
+    positions: Vec<[f32; 3]>,
+    faces:     Vec<[u32; 3]>,
+    color:     [f32; 3],
+) -> Cloth {
+    let n = positions.len();
+    let mut c = Cloth::from_mesh(
+        ctx, positions, faces,
+        vec![color::SPHERE; n],
+        HashMap::new(),
+        light,
+    );
+    c.set_material(ctx, Material::Rigid);
+    c
+}
+
 // ── Ground plane ──────────────────────────────────────────────────────────────
 
 /// Large axis-aligned ground quad at `y`, `2*half_extent` wide.

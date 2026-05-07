@@ -6,6 +6,8 @@ pub mod rigid_sim;
 pub mod crease;
 pub mod particle_hash;
 pub mod sdf;
+pub mod obj_loader;
+pub mod mesh_sdf;
 pub mod particle_cloth_sim;
 pub mod particle_paper_sim;
 
@@ -25,6 +27,8 @@ pub use traits::MeshSim;
 pub use crease::{CreasePattern, CreaseType};
 pub use particle_hash::ParticleHash;
 pub use sdf::{SdfObstacle, SignedDistanceField};
+pub use obj_loader::ObjMesh;
+pub use mesh_sdf::{bake as bake_mesh_sdf, MeshSdfVolume};
 pub use particle_cloth_sim::ParticleClothSim;
 pub use particle_paper_sim::{ParticleHinge, ParticlePaperSim};
 

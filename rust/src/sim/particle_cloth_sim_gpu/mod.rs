@@ -25,6 +25,7 @@ use wgpu::util::DeviceExt;
 use crate::params::SimParams;
 
 use super::particle_cloth_sim::ParticleClothSim;
+use super::mesh_sdf::MeshSdfVolume;
 use super::sdf::{SdfObstacle, SignedDistanceField};
 use super::shared::Positions;
 use super::traits::MeshSim;
@@ -149,12 +150,52 @@ fn obstacle_to_gpu(o: &SdfObstacle) -> ObstacleGpu {
             (2u32, [half_ext.x, half_ext.y, half_ext.z, 0.0], [0.0; 4]),
         SignedDistanceField::Capsule { half_h, radius } =>
             (3u32, [half_h, radius, 0.0, 0.0], [0.0; 4]),
+        SignedDistanceField::MeshTex { bounds_min, bounds_max } =>
+            (4u32,
+             [bounds_min.x, bounds_min.y, bounds_min.z, 0.0],
+             [bounds_max.x, bounds_max.y, bounds_max.z, 0.0]),
     };
     ObstacleGpu {
         center: [o.center.x, o.center.y, o.center.z, 0.0],
         rot0: row(0), rot1: row(1), rot2: row(2),
         a, b, kind, _p: [0; 3],
     }
+}
+
+fn create_mesh_sdf_texture(
+    device: &wgpu::Device,
+    queue:  &wgpu::Queue,
+    data:   &[f32],
+    dims:   [u32; 3],
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh_sdf_tex"),
+        size: wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes: &[u8] = bytemuck::cast_slice(data);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * dims[0]),
+            rows_per_image: Some(dims[1]),
+        },
+        wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] },
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 // ── Bind-group / pipeline plumbing ──────────────────────────────────────────
@@ -267,6 +308,10 @@ pub struct ParticleClothSimGpu {
     obstacles_buf:    wgpu::Buffer,
     obs_capacity:     u32,
     num_obstacles:    u32,
+
+    mesh_sdf_tex:    wgpu::Texture,
+    mesh_sdf_view:   wgpu::TextureView,
+    bgl_sdf:         wgpu::BindGroupLayout,
 
     // Per-pass uniform buffers (rewritten each substep).
     predict_u:    wgpu::Buffer,
@@ -526,6 +571,19 @@ impl ParticleClothSimGpu {
             storage_entry(1, false), storage_entry(2, true),
             storage_entry(3, true),  storage_entry(4, true),
             storage_entry(5, true),
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    // R32Float is not filterable without the `float32-filterable`
+                    // feature; the shader uses textureLoad and does manual
+                    // trilinear interpolation instead.
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ]);
         let bgl_pin_vel = make_bgl(&device, "bgl_pin_vel", vec![
             uniform_entry(0),
@@ -633,10 +691,23 @@ impl ParticleClothSimGpu {
             entry(0, &contact_apply_u), entry(1, &q_buf),
             entry(2, &dq_buf), entry(3, &w_inv_buf),
         ]);
-        let bg_sdf = mk_bg("bg_sdf", &bgl_sdf, vec![
-            entry(0, &sdf_u), entry(1, &q_buf), entry(2, &q_pred_buf),
-            entry(3, &w_inv_buf), entry(4, &radius_buf), entry(5, &obstacles_buf),
-        ]);
+        // Dummy 1×1×1 R32Float 3D texture so the SDF bind group is always
+        // valid. Replaced via `set_mesh_sdf` when an actual mesh SDF is set.
+        let (mesh_sdf_tex, mesh_sdf_view) = create_mesh_sdf_texture(&device, &queue, &[0.0f32], [1, 1, 1]);
+
+        let bg_sdf = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg_sdf"),
+            layout: &bgl_sdf,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: sdf_u.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: q_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: q_pred_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: w_inv_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: radius_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: obstacles_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&mesh_sdf_view) },
+            ],
+        });
         let bg_pin_vel = mk_bg("bg_pin_vel", &bgl_pin_vel, vec![
             entry(0, &pin_vel_u), entry(1, &q_buf), entry(2, &q_prev_buf),
             entry(3, &v_buf),     entry(4, &w_inv_buf),
@@ -665,6 +736,8 @@ impl ParticleClothSimGpu {
             particle_cell_buf, particle_id_buf,
             dq_buf,
             obstacles_buf, obs_capacity, num_obstacles,
+            mesh_sdf_tex, mesh_sdf_view,
+            bgl_sdf,
             predict_u, copy_u,
             distance_us_stretch, distance_us_bend,
             zero_lambda_stretch_u, zero_lambda_bend_u,
@@ -710,6 +783,27 @@ impl ParticleClothSimGpu {
             self.queue.write_buffer(&self.obstacles_buf, 0, bytemuck::cast_slice(&gpu));
         }
         self.num_obstacles = need;
+    }
+
+    /// Replace the mesh SDF texture. Resizes/recreates the texture and the
+    /// SDF bind group. Call once after construction with the baked volume.
+    pub fn set_mesh_sdf(&mut self, vol: &MeshSdfVolume) {
+        let (tex, view) = create_mesh_sdf_texture(&self.device, &self.queue, &vol.data, vol.dims);
+        self.mesh_sdf_tex  = tex;
+        self.mesh_sdf_view = view;
+        self.bg_sdf = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg_sdf"),
+            layout: &self.bgl_sdf,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.sdf_u.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.q_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.q_pred_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.w_inv_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.radius_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.obstacles_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_sdf_view) },
+            ],
+        });
     }
 
     pub fn dispatch_count(invocations: u32, group: u32) -> u32 {

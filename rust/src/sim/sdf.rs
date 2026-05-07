@@ -12,6 +12,10 @@ pub enum SignedDistanceField {
     Plane   { n: na::Vector3<f32>, d: f32 },
     Box     { half_ext: na::Vector3<f32> },
     Capsule { half_h:   f32, radius: f32 },
+    /// Sampled-volume SDF: distance is read from a 3D texture (only the GPU
+    /// path actually samples it). On the CPU side we just use the bbox as a
+    /// coarse fallback so headless tests don't crash.
+    MeshTex { bounds_min: na::Vector3<f32>, bounds_max: na::Vector3<f32> },
 }
 
 impl SignedDistanceField {
@@ -53,6 +57,17 @@ impl SignedDistanceField {
                     na::Vector3::new(nx, ny, nz)
                 };
                 (dist, n)
+            }
+            SignedDistanceField::MeshTex { bounds_min, bounds_max } => {
+                // CPU fallback: distance to the bbox. GPU path samples the
+                // texture for accurate values.
+                let half_ext = 0.5 * (bounds_max - bounds_min);
+                let center   = 0.5 * (bounds_max + bounds_min);
+                let p_loc = p - center;
+                let q = p_loc.abs() - half_ext;
+                let outside = na::Vector3::new(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0));
+                let outside_len = outside.norm();
+                (outside_len, na::Vector3::y())
             }
             SignedDistanceField::Capsule { half_h, radius } => {
                 // Segment along Y axis from -half_h to +half_h.
@@ -97,6 +112,12 @@ impl SdfObstacle {
         Self {
             center, rotation: na::Matrix3::identity(), vel: na::Vector3::zeros(),
             sdf: SignedDistanceField::Box { half_ext },
+        }
+    }
+    pub fn mesh(center: na::Vector3<f32>, bounds_min: na::Vector3<f32>, bounds_max: na::Vector3<f32>) -> Self {
+        Self {
+            center, rotation: na::Matrix3::identity(), vel: na::Vector3::zeros(),
+            sdf: SignedDistanceField::MeshTex { bounds_min, bounds_max },
         }
     }
 

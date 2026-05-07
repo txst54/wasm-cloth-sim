@@ -9,6 +9,7 @@ export default defineConfig({
         paper: resolve(__dirname, 'paper/index.html'),
         particle: resolve(__dirname, 'particle/index.html'),
         particle_paper: resolve(__dirname, 'particle_paper/index.html'),
+        head: resolve(__dirname, 'head/index.html'),
       },
     },
   },
