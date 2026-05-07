@@ -268,7 +268,10 @@ impl ParticlePaperSimGpu {
     pub fn set_fold_speed(&mut self, rps: f32) { self.fold_speed = rps; }
 
     /// Run one full `step` on the GPU.
-    pub fn step_gpu(&mut self, params: &SimParams) {
+    /// Encode a full paper step (substeps + hinges) into the caller's
+    /// encoder. Does not kick the readback or submit. Counterpart to
+    /// `ParticleClothSimGpu::encode_step`.
+    pub fn encode_step(&mut self, enc: &mut wgpu::CommandEncoder, params: &SimParams) {
         // Rate-limit current_angle (one tick per outer step, like PaperSim).
         let dt = params.time_step as f32;
         let max_delta = self.fold_speed * dt;
@@ -292,14 +295,10 @@ impl ParticlePaperSimGpu {
         let alpha_c = 0.0f32;
         let mu = if params.friction_enabled { params.friction_mu as f32 } else { 0.0 };
 
-        let mut enc = self.cloth.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ppaper_gpu_step"),
-        });
-
         for _sub in 0..n_sub {
-            self.cloth.encode_predict(&mut enc, h_dt, g, damping);
-            self.cloth.encode_copy_q_to_pred(&mut enc);
-            self.cloth.encode_zero_lambdas(&mut enc);
+            self.cloth.encode_predict(enc, h_dt, g, damping);
+            self.cloth.encode_copy_q_to_pred(enc);
+            self.cloth.encode_zero_lambdas(enc);
             // Zero hinge lambdas via queue.write_buffer (small).
             if self.n_hinges > 0 {
                 let zeros = vec![0f32; self.n_hinges as usize];
@@ -307,24 +306,35 @@ impl ParticlePaperSimGpu {
             }
 
             if params.stretch_enabled {
-                self.cloth.encode_distance_pass(&mut enc, h_dt, alpha_s, /*stretch=*/ true);
+                self.cloth.encode_distance_pass(enc, h_dt, alpha_s, /*stretch=*/ true);
             }
             if params.bending_enabled {
-                self.cloth.encode_distance_pass(&mut enc, h_dt, alpha_b, /*stretch=*/ false);
+                self.cloth.encode_distance_pass(enc, h_dt, alpha_b, /*stretch=*/ false);
             }
             if self.n_hinges > 0 {
-                self.encode_dihedral(&mut enc, h_dt);
+                self.encode_dihedral(enc, h_dt);
             }
             if params.self_collision_enabled {
-                self.cloth.encode_self_collision(&mut enc, h_dt, alpha_c, mu);
+                self.cloth.encode_self_collision(enc, h_dt, alpha_c, mu);
             }
-            self.cloth.encode_sdf(&mut enc, alpha_c, mu);
-            self.cloth.encode_pin_velocity(&mut enc, h_dt, params.pin_enabled);
+            self.cloth.encode_sdf(enc, alpha_c, mu);
+            self.cloth.encode_pin_velocity(enc, h_dt, params.pin_enabled);
         }
+    }
 
+    pub fn step_gpu(&mut self, params: &SimParams) {
+        let mut enc = self.cloth.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ppaper_gpu_step"),
+        });
+        self.encode_step(&mut enc, params);
         let kick = self.cloth.encode_readback_kick(&mut enc);
         self.cloth.finalize_submit(enc, kick);
     }
+
+    /// Borrow the underlying cloth for direct access to its q buffer and
+    /// readback machinery (used by the render loop).
+    pub fn cloth(&self) -> &ParticleClothSimGpu { &self.cloth }
+    pub fn cloth_mut(&mut self) -> &mut ParticleClothSimGpu { &mut self.cloth }
 
     fn encode_dihedral(&self, enc: &mut wgpu::CommandEncoder, h_dt: f32) {
         for k in 0..self.coloring.num_colors() {

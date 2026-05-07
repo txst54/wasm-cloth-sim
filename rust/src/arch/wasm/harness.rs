@@ -584,20 +584,36 @@ pub async fn run_particle_cloth(canvas_id: &str) -> Result<(), JsValue> {
 
         #[cfg(feature = "gpu")]
         {
+            // Drain readback into sim.q for picking. Picking can tolerate
+            // 1–3 frame stale positions; rendering cannot, which is why
+            // positions go directly into the vertex buffer below.
             gpu_sim.poll_readback();
             {
                 use crate::sim::traits::MeshSim;
                 sim.q.copy_from(gpu_sim.positions());
                 gpu_sim.set_clicked_vertex(sim.clicked_vertex);
                 gpu_sim.set_mouse_pos(sim.mouse_pos);
-                gpu_sim.step(&params.borrow());
             }
+
+            // One submission: sim step + GPU→VB position copy + GPU normals.
+            // Positions and normals land in the vertex buffer in the same
+            // submission as the sim step that produced them — no async
+            // readback latency, no shading lag.
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("particle_cloth_step+sync+normals"),
+            });
+            gpu_sim.encode_step(&mut enc, &params.borrow());
+            cloth.encode_position_sync(&mut enc, gpu_sim.q_buffer());
+            cloth.encode_normals(&mut enc);
+            // Kick staging readback for next frame's picking.
+            let kick = gpu_sim.encode_readback_kick(&mut enc);
+            gpu_sim.finalize_submit(enc, kick);
         }
         #[cfg(not(feature = "gpu"))]
         {
             sim.step(&params.borrow());
+            cloth.sync_from_sim(&sim.q, ctx);
         }
-        cloth.sync_from_sim(&sim.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
             light.clear_shadow(ctx);
@@ -705,14 +721,22 @@ fn spawn_particle_paper_loop(
                 sim.core.q.copy_from(gpu_sim.positions());
                 gpu_sim.set_clicked_vertex(sim.core.clicked_vertex);
                 gpu_sim.set_mouse_pos(sim.core.mouse_pos);
-                gpu_sim.step(&params.borrow());
             }
+
+            let mut enc = gpu_sim.cloth().device().create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("ppaper_step+sync+normals") },
+            );
+            gpu_sim.encode_step(&mut enc, &params.borrow());
+            cloth.encode_position_sync(&mut enc, gpu_sim.cloth().q_buffer());
+            cloth.encode_normals(&mut enc);
+            let kick = gpu_sim.cloth().encode_readback_kick(&mut enc);
+            gpu_sim.cloth_mut().finalize_submit(enc, kick);
         }
         #[cfg(not(feature = "gpu"))]
         {
             sim.step(&params.borrow());
+            cloth.sync_from_sim(&sim.core.q, ctx);
         }
-        cloth.sync_from_sim(&sim.core.q, ctx);
 
         if let Ok((frame, view)) = ctx.begin_frame() {
             light.clear_shadow(ctx);

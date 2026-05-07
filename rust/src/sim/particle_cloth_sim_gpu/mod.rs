@@ -920,8 +920,11 @@ impl ParticleClothSimGpu {
         }
     }
 
-    /// Run one full `step` (n_substeps internal substeps) on the GPU.
-    pub fn step_gpu(&mut self, params: &SimParams) {
+    /// Encode one full `step` (n_substeps internal substeps) into the
+    /// caller's command encoder. Does NOT submit and does NOT kick the
+    /// async readback. Use this when you want to bundle the sim step with
+    /// other GPU work (e.g. a vertex-buffer copy) into a single submission.
+    pub fn encode_step(&self, enc: &mut wgpu::CommandEncoder, params: &SimParams) {
         let dt = params.time_step as f32;
         let n_sub = params.num_substeps.max(1);
         let h = dt / n_sub as f32;
@@ -937,27 +940,32 @@ impl ParticleClothSimGpu {
         let alpha_c = 0.0f32;
         let mu = if params.friction_enabled { params.friction_mu as f32 } else { 0.0 };
 
+        for _sub in 0..n_sub {
+            self.encode_predict(enc, h, g, damping);
+            self.encode_copy_q_to_pred(enc);
+            self.encode_zero_lambdas(enc);
+            if params.stretch_enabled {
+                self.encode_distance_pass(enc, h, alpha_s, /*stretch=*/ true);
+            }
+            if params.bending_enabled {
+                self.encode_distance_pass(enc, h, alpha_b, /*stretch=*/ false);
+            }
+            if params.self_collision_enabled {
+                self.encode_self_collision(enc, h, alpha_c, mu);
+            }
+            self.encode_sdf(enc, alpha_c, mu);
+            self.encode_pin_velocity(enc, h, params.pin_enabled);
+        }
+    }
+
+    /// Run one full `step` end-to-end: encode, kick the staging readback,
+    /// submit. Used by paths that don't want to manage their own encoder
+    /// (native, headless, the `MeshSim::step` trait impl).
+    pub fn step_gpu(&mut self, params: &SimParams) {
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("psim_gpu_step"),
         });
-
-        for _sub in 0..n_sub {
-            self.encode_predict(&mut enc, h, g, damping);
-            self.encode_copy_q_to_pred(&mut enc);
-            self.encode_zero_lambdas(&mut enc);
-            if params.stretch_enabled {
-                self.encode_distance_pass(&mut enc, h, alpha_s, /*stretch=*/ true);
-            }
-            if params.bending_enabled {
-                self.encode_distance_pass(&mut enc, h, alpha_b, /*stretch=*/ false);
-            }
-            if params.self_collision_enabled {
-                self.encode_self_collision(&mut enc, h, alpha_c, mu);
-            }
-            self.encode_sdf(&mut enc, alpha_c, mu);
-            self.encode_pin_velocity(&mut enc, h, params.pin_enabled);
-        }
-
+        self.encode_step(&mut enc, params);
         let kick = self.encode_readback_kick(&mut enc);
         self.finalize_submit(enc, kick);
     }
