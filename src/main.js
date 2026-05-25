@@ -25,7 +25,7 @@ import init, {
 } from '../rust/pkg/my_webgpu_app.js'
 import {
   CheckboxRow, Divider, Button,
-  Param, Toggle, ParamConstraintGroup, NavPanel,
+  Param, Toggle, ParamConstraintGroup, NavPanel, LoadingOverlay,
 } from './components.js'
 
 const USE_DC_DEFAULT = false
@@ -35,7 +35,8 @@ const P = {
   timeStep:   new Param({ label: 'time step',  min: 0.001, max: 0.1, step: 0.001, value: 0.01,  onChange: set_time_step }),
   iters:      new Param({ label: 'iterations', min: 1, max: 30, step: 1, value: 5, asInt: true, onChange: set_constraint_iters }),
   substeps:   new Param({ label: 'substeps',   min: 1, max: 40, step: 1, value: 10, asInt: true, onChange: set_num_substeps }),
-  resolution: new Param({ label: 'resolution', min: 4, max: 128, step: 1, value: 32, asInt: true, onChange: set_resolution }),
+  resolution: new Param({ label: 'resolution', min: 4, max: 128, step: 1, value: 32, asInt: true, onChange: set_resolution,
+                          overlayLabel: v => `Rebuilding mesh (resolution ${v})…` }),
 
   gravityG:   new Param({ label: 'Gravity G',  min: -20, max: 0, step: 0.1, value: -9.8, onChange: set_gravity_g }),
   pinWeight:  new Param({ label: 'Pin Weight', min: 0,   max: 1, step: 0.05, value: 1.0, onChange: set_pin_weight }),
@@ -78,7 +79,10 @@ function buildPanel() {
   title.textContent = 'Sim Params'
   panel.appendChild(title)
 
-  panel.appendChild(Button({ label: 'reset sim', onClick: () => P.resolution.apply() }))
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => LoadingOverlay.withLoading('Rebuilding mesh…', () => P.resolution.apply()),
+  }))
 
   panel.appendChild(P.timeStep.slider())
   panel.appendChild(P.iters.slider())
@@ -139,7 +143,7 @@ init().then(async () => {
   applyAllInitParams()
 
   try {
-    await run('canvas')
+    await LoadingOverlay.withLoading('Initializing simulation…', () => run('canvas'))
   } catch (e) {
     console.error('WASM run() failed:', e)
   }

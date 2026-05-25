@@ -24,14 +24,15 @@ import init, {
 } from '../rust/pkg/my_webgpu_app.js'
 import {
   CheckboxRow, Divider, Button,
-  Param, Toggle, ParamConstraintGroup, NavPanel, CreasePatternDropdown,
+  Param, Toggle, ParamConstraintGroup, NavPanel, CreasePatternDropdown, LoadingOverlay,
 } from './components.js'
 
 const USE_DC_DEFAULT = true
 const INITIAL_CP = 'waterbomb_tess.cp'
 
 const P = {
-  resolution: new Param({ label: 'resolution', min: 1, max: 200, step: 1, value: 64, asInt: true, onChange: set_particle_paper_resolution }),
+  resolution: new Param({ label: 'resolution', min: 1, max: 200, step: 1, value: 64, asInt: true, onChange: set_particle_paper_resolution,
+                          overlayLabel: v => `Triangulating (resolution ${v})…` }),
 
   foldAngle: new Param({ label: 'angle (°)', min: 0, max: 180, step: 1, value: 0, onChange: set_particle_paper_fold_angle }),
   foldSpeed: new Param({ label: 'fold speed (°/s)', min: 10, max: 720, step: 10, value: 286,
@@ -78,15 +79,20 @@ function buildPanel() {
   title.textContent = 'Particle Paper Sim'
   panel.appendChild(title)
 
-  panel.appendChild(Button({ label: 'reset sim', onClick: () => P.resolution.apply() }))
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => LoadingOverlay.withLoading('Rebuilding mesh…', () => P.resolution.apply()),
+  }))
 
   panel.appendChild(CreasePatternDropdown({
     initial: INITIAL_CP,
     onLoad: async cpData => {
       try {
-        await run_particle_paper_with_cp('canvas', cpData)
-        applyAllInitParams()
-        P.hingeCompliance.apply()
+        await LoadingOverlay.withLoading('Loading crease pattern…', async () => {
+          await run_particle_paper_with_cp('canvas', cpData)
+          applyAllInitParams()
+          P.hingeCompliance.apply()
+        })
       } catch (e) {
         console.error('run_particle_paper_with_cp() failed:', e)
       }
@@ -141,23 +147,25 @@ function buildPanel() {
 init().then(async () => {
   applyAllInitParams()
 
-  try {
-    const file = `../assets/${INITIAL_CP}`
-    const cpResponse = await fetch(file)
-    if (cpResponse.ok) {
-      const cpData = await cpResponse.text()
-      await run_particle_paper_with_cp('canvas', cpData)
-      console.log(`Loaded crease pattern: ${file}`)
-    } else {
-      console.log('No crease pattern found, using simple particle paper sim')
-      await run_particle_paper('canvas')
+  await LoadingOverlay.withLoading('Loading crease pattern…', async () => {
+    try {
+      const file = `../assets/${INITIAL_CP}`
+      const cpResponse = await fetch(file)
+      if (cpResponse.ok) {
+        const cpData = await cpResponse.text()
+        await run_particle_paper_with_cp('canvas', cpData)
+        console.log(`Loaded crease pattern: ${file}`)
+      } else {
+        console.log('No crease pattern found, using simple particle paper sim')
+        await run_particle_paper('canvas')
+      }
+    } catch (e) {
+      console.error('run_particle_paper() failed:', e)
     }
-  } catch (e) {
-    console.error('run_particle_paper() failed:', e)
-  }
 
-  // Hinges only exist post-build, so re-apply hinge compliance.
-  P.hingeCompliance.apply()
+    // Hinges only exist post-build, so re-apply hinge compliance.
+    P.hingeCompliance.apply()
+  })
 
   buildPanel()
   NavPanel()

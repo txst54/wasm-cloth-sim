@@ -63,11 +63,16 @@ impl AttrVertex {
     };
 }
 
+// One entry per line-list vertex. `vidx` indexes into the GPU position buffer
+// (`array<vec4<f32>>`), which the wireframe vertex shader fetches at draw time
+// — that way the wireframe always reflects live GPU positions without any CPU
+// readback. `color` is per line vertex so each edge can carry its own color
+// (mountain/valley/regular) even though edges share mesh vertices.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct WireframeVertex {
-    position: [f32; 3],
-    color:    [f32; 3],
+    color: [f32; 3],
+    vidx:  u32,
 }
 
 impl WireframeVertex {
@@ -76,12 +81,14 @@ impl WireframeVertex {
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x3,
-            1 => Float32x3,
+            1 => Uint32,
         ],
     };
 }
 
 const WIREFRAME_SHADER: &str = r#"
+@group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
+
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position:  vec3<f32>,
@@ -89,8 +96,8 @@ struct CameraUniform {
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
 
 struct WireframeIn {
-    @location(0) position: vec3<f32>,
-    @location(1) color:    vec3<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) vidx:  u32,
 }
 
 struct WireframeOut {
@@ -100,8 +107,9 @@ struct WireframeOut {
 
 @vertex
 fn vs_main(in: WireframeIn) -> WireframeOut {
+    let p = positions[in.vidx].xyz;
     var out: WireframeOut;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    out.clip_position = camera.view_proj * vec4<f32>(p, 1.0);
     out.color = in.color;
     return out;
 }
@@ -584,7 +592,7 @@ pub struct Cloth {
     wireframe_pipeline: wgpu::RenderPipeline,
     wireframe_vertex_buffer: wgpu::Buffer,
     wireframe_vertex_count: u32,
-    wireframe_edges: Vec<(u32, u32, [f32; 3])>,
+    wireframe_positions_bind_group: wgpu::BindGroup,
     pub wireframe_enabled: bool,
     material_buffer: wgpu::Buffer,
     material_bind_group: wgpu::BindGroup,
@@ -664,24 +672,20 @@ impl Cloth {
         let shadow_pipeline = build_shadow_pipeline(ctx, &lighting.shadow_bind_group_layout);
 
         let gray = [0.2f32, 0.2, 0.2];
-        let mut wireframe_edges: Vec<(u32, u32, [f32; 3])> = Vec::new();
+        let mut wireframe_verts: Vec<WireframeVertex> = Vec::new();
         for row in 0..n {
             for col in 0..n {
                 let v = (row * n + col) as u32;
                 if col < n - 1 {
-                    wireframe_edges.push((v, v + 1, gray));
+                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v });
+                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v + 1 });
                 }
                 if row < n - 1 {
-                    wireframe_edges.push((v, v + n as u32, gray));
+                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v });
+                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v + n as u32 });
                 }
             }
         }
-        let wireframe_verts: Vec<WireframeVertex> = wireframe_edges.iter()
-            .flat_map(|&(a, b, color)| [
-                WireframeVertex { position: positions[a as usize], color },
-                WireframeVertex { position: positions[b as usize], color },
-            ])
-            .collect();
         let wireframe_vertex_count = wireframe_verts.len() as u32;
 
         let wireframe_vertex_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -690,10 +694,20 @@ impl Cloth {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
+        let wf_pos_bgl = wireframe_positions_bgl(ctx);
+        let wireframe_positions_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Wireframe Positions BG"),
+            layout: &wf_pos_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: position_buffer.as_entire_binding(),
+            }],
+        });
+
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
-            .bind_group_layout(&dummy_group0_bgl(ctx))
+            .bind_group_layout(&wf_pos_bgl)
             .bind_group_layout(&camera_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
@@ -710,7 +724,7 @@ impl Cloth {
             position_buffer, attr_buffer,
             index_buffer, index_count, num_verts,
             wireframe_pipeline, wireframe_vertex_buffer, wireframe_vertex_count,
-            wireframe_edges,
+            wireframe_positions_bind_group,
             wireframe_enabled: false,
             material_buffer, material_bind_group, material: Material::Cloth,
             normals,
@@ -784,22 +798,18 @@ impl Cloth {
             add_edge(i2, i0);
         }
 
-        let wireframe_edges: Vec<(u32, u32, [f32; 3])> = edge_set.iter()
-            .map(|&(a, b)| {
+        let wireframe_verts: Vec<WireframeVertex> = edge_set.iter()
+            .flat_map(|&(a, b)| {
                 let color = match edge_types.get(&(a, b)) {
                     Some(CreaseType::Mountain) => [0.9, 0.1, 0.1],
                     Some(CreaseType::Valley)   => [0.1, 0.3, 1.0],
                     _ => [0.25, 0.25, 0.25],
                 };
-                (a, b, color)
+                [
+                    WireframeVertex { color, vidx: a },
+                    WireframeVertex { color, vidx: b },
+                ]
             })
-            .collect();
-
-        let wireframe_verts: Vec<WireframeVertex> = wireframe_edges.iter()
-            .flat_map(|&(a, b, color)| [
-                WireframeVertex { position: positions[a as usize], color },
-                WireframeVertex { position: positions[b as usize], color },
-            ])
             .collect();
         let wireframe_vertex_count = wireframe_verts.len() as u32;
 
@@ -809,10 +819,20 @@ impl Cloth {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
+        let wf_pos_bgl = wireframe_positions_bgl(ctx);
+        let wireframe_positions_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Wireframe Positions BG"),
+            layout: &wf_pos_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: position_buffer.as_entire_binding(),
+            }],
+        });
+
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
-            .bind_group_layout(&dummy_group0_bgl(ctx))
+            .bind_group_layout(&wf_pos_bgl)
             .bind_group_layout(&camera_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
@@ -839,7 +859,7 @@ impl Cloth {
             wireframe_pipeline,
             wireframe_vertex_buffer,
             wireframe_vertex_count,
-            wireframe_edges,
+            wireframe_positions_bind_group,
             wireframe_enabled: false,
             material_buffer, material_bind_group, material: Material::Cloth,
             normals,
@@ -870,16 +890,8 @@ impl Cloth {
         ctx.queue.write_buffer(&self.position_buffer, 0, bytemuck::cast_slice(&pos_verts));
 
         self.upload_attrs(ctx);
-
-        if self.wireframe_enabled && !self.wireframe_edges.is_empty() {
-            let wf_verts: Vec<WireframeVertex> = self.wireframe_edges.iter()
-                .flat_map(|&(a, b, color)| [
-                    WireframeVertex { position: self.positions[a as usize], color },
-                    WireframeVertex { position: self.positions[b as usize], color },
-                ])
-                .collect();
-            ctx.queue.write_buffer(&self.wireframe_vertex_buffer, 0, bytemuck::cast_slice(&wf_verts));
-        }
+        // Wireframe positions are fetched from `position_buffer` directly in
+        // the wireframe vertex shader, so there's nothing to re-upload here.
     }
 
     /// Recompute normals from `self.positions` and upload normal+color attrs.
@@ -1028,6 +1040,7 @@ impl Cloth {
 
             if self.wireframe_enabled {
                 rpass.set_pipeline(&self.wireframe_pipeline);
+                rpass.set_bind_group(0, &self.wireframe_positions_bind_group, &[]);
                 rpass.set_bind_group(1, &camera.bind_group, &[]);
                 rpass.set_vertex_buffer(0, self.wireframe_vertex_buffer.slice(..));
                 rpass.draw(0..self.wireframe_vertex_count, 0..1);
@@ -1053,12 +1066,23 @@ fn make_camera_bgl(ctx: &GpuContext) -> wgpu::BindGroupLayout {
     })
 }
 
-/// Empty-but-not-quite layout for the wireframe pipeline @group(0). We don't
-/// bind anything to it, so the shader simply doesn't reference group 0.
-fn dummy_group0_bgl(ctx: &GpuContext) -> wgpu::BindGroupLayout {
+/// @group(0) for the wireframe pipeline: a storage binding over the live GPU
+/// position buffer so the vertex shader can fetch each line endpoint at draw
+/// time. Removes the need to keep a CPU mirror of positions in sync with the
+/// GPU sim's `q_buf`.
+fn wireframe_positions_bgl(ctx: &GpuContext) -> wgpu::BindGroupLayout {
     ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Wireframe Empty BGL"),
-        entries: &[],
+        label: Some("Wireframe Positions BGL"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
     })
 }
 

@@ -28,14 +28,15 @@ import init, {
 } from '../rust/pkg/my_webgpu_app.js'
 import {
   CheckboxRow, Divider, Button,
-  Param, Toggle, ParamConstraintGroup, NavPanel, CreasePatternDropdown,
+  Param, Toggle, ParamConstraintGroup, NavPanel, CreasePatternDropdown, LoadingOverlay,
 } from './components.js'
 
 const USE_DC_DEFAULT = false
 const INITIAL_CP = 'miura_ori.cp'
 
 const P = {
-  resolution: new Param({ label: 'resolution', min: 1, max: 64, step: 1, value: 1, asInt: true, onChange: set_paper_resolution }),
+  resolution: new Param({ label: 'resolution', min: 1, max: 64, step: 1, value: 1, asInt: true, onChange: set_paper_resolution,
+                          overlayLabel: v => `Triangulating (resolution ${v})…` }),
 
   foldAngle:  new Param({ label: 'angle (°)',       min: 0, max: 180, step: 1, value: 0, onChange: set_paper_fold_angle }),
   foldSpeed:  new Param({ label: 'fold speed (°/s)', min: 10, max: 720, step: 10, value: 286,
@@ -86,14 +87,19 @@ function buildPanel() {
   title.textContent = 'Paper Sim'
   panel.appendChild(title)
 
-  panel.appendChild(Button({ label: 'reset sim', onClick: () => P.resolution.apply() }))
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => LoadingOverlay.withLoading('Rebuilding mesh…', () => P.resolution.apply()),
+  }))
 
   panel.appendChild(CreasePatternDropdown({
     initial: INITIAL_CP,
     onLoad: async cpData => {
       try {
-        await run_paper_with_cp('canvas', cpData)
-        applyAllInitParams()
+        await LoadingOverlay.withLoading('Loading crease pattern…', async () => {
+          await run_paper_with_cp('canvas', cpData)
+          applyAllInitParams()
+        })
       } catch (e) {
         console.error('run_paper_with_cp() failed:', e)
       }
@@ -169,20 +175,22 @@ function buildPanel() {
 init().then(async () => {
   applyAllInitParams()
 
-  try {
-    const file = `../assets/${INITIAL_CP}`
-    const cpResponse = await fetch(file)
-    if (cpResponse.ok) {
-      const cpData = await cpResponse.text()
-      await run_paper_with_cp('canvas', cpData)
-      console.log(`Loaded crease pattern: ${file}`)
-    } else {
-      console.log('No crease pattern found, using simple paper sim')
-      await run_paper('canvas')
+  await LoadingOverlay.withLoading('Loading crease pattern…', async () => {
+    try {
+      const file = `../assets/${INITIAL_CP}`
+      const cpResponse = await fetch(file)
+      if (cpResponse.ok) {
+        const cpData = await cpResponse.text()
+        await run_paper_with_cp('canvas', cpData)
+        console.log(`Loaded crease pattern: ${file}`)
+      } else {
+        console.log('No crease pattern found, using simple paper sim')
+        await run_paper('canvas')
+      }
+    } catch (e) {
+      console.error('run_paper() failed:', e)
     }
-  } catch (e) {
-    console.error('run_paper() failed:', e)
-  }
+  })
 
   buildPanel()
   NavPanel()

@@ -1,3 +1,85 @@
+/**
+ * LoadingOverlay — fullscreen spinner with a label.
+ * Use show/hide directly, or wrap heavy work with withLoading(label, fn).
+ * For sync work (e.g. WASM mesh rebuilds), withLoading awaits two animation
+ * frames before invoking fn so the overlay actually paints first.
+ */
+export const LoadingOverlay = (() => {
+  let root = null
+  let labelEl = null
+  let depth = 0
+
+  function ensure() {
+    if (root) return
+    root = document.createElement('div')
+    root.className = 'loading-overlay hidden'
+    const card = document.createElement('div')
+    card.className = 'loading-card'
+    const spinner = document.createElement('div')
+    spinner.className = 'loading-spinner'
+    labelEl = document.createElement('div')
+    labelEl.className = 'loading-label'
+    labelEl.textContent = 'Loading…'
+    card.append(spinner, labelEl)
+    root.appendChild(card)
+    document.body.appendChild(root)
+  }
+
+  function show(label = 'Loading…') {
+    ensure()
+    labelEl.textContent = label
+    depth++
+    root.classList.remove('hidden')
+  }
+
+  function hide() {
+    if (!root) return
+    depth = Math.max(0, depth - 1)
+    if (depth === 0) root.classList.add('hidden')
+  }
+
+  function nextPaint() {
+    return new Promise(res =>
+      requestAnimationFrame(() => requestAnimationFrame(res))
+    )
+  }
+
+  async function withLoading(label, fn) {
+    show(label)
+    await nextPaint()
+    try {
+      return await fn()
+    } finally {
+      hide()
+    }
+  }
+
+  return { show, hide, withLoading }
+})()
+
+/**
+ * coalesced — wrap an async fn so only one call runs at a time.
+ * If invoked while in flight, the latest args are queued; intermediate
+ * args are dropped. Useful for slider-driven heavy work.
+ */
+export function coalesced(asyncFn) {
+  let running = false
+  let pending = null
+  async function pump(args) {
+    running = true
+    try { await asyncFn(...args) } finally { running = false }
+    if (pending) {
+      const next = pending
+      pending = null
+      await pump(next)
+    }
+  }
+  return (...args) => {
+    if (running) { pending = args; return }
+    pump(args)
+  }
+}
+
 /** Create a DOM element with className and optional attributes. */
 function el(tag, className, attrs = {}) {
   const node = document.createElement(tag)
@@ -150,8 +232,8 @@ export function Button({ label, onClick }) {
  * Mutating .value (via slider) keeps subsequent .apply() calls in sync.
  */
 export class Param {
-  constructor({ label, min, max, step, value, onChange, transform = v => v, asInt = false }) {
-    Object.assign(this, { label, min, max, step, value, onChange, transform, asInt })
+  constructor({ label, min, max, step, value, onChange, transform = v => v, asInt = false, overlayLabel = null }) {
+    Object.assign(this, { label, min, max, step, value, onChange, transform, asInt, overlayLabel })
   }
   get applied() {
     const v = this.asInt ? Math.round(this.value) : this.value
@@ -159,9 +241,22 @@ export class Param {
   }
   apply() { this.onChange(this.applied) }
   slider({ indent = false } = {}) {
+    let onChange
+    if (this.overlayLabel) {
+      const run = coalesced(async v => {
+        this.value = v
+        const lbl = typeof this.overlayLabel === 'function'
+          ? this.overlayLabel(this.applied)
+          : this.overlayLabel
+        await LoadingOverlay.withLoading(lbl, () => this.apply())
+      })
+      onChange = v => run(v)
+    } else {
+      onChange = v => { this.value = v; this.apply() }
+    }
     return SliderRow({
       label: this.label, min: this.min, max: this.max, step: this.step, value: this.value, indent,
-      onChange: v => { this.value = v; this.apply() },
+      onChange,
     })
   }
   toSliderOptions() {

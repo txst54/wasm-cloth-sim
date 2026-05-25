@@ -19,13 +19,14 @@ import init, {
 } from '../rust/pkg/my_webgpu_app.js'
 import {
   CheckboxRow, Divider, Button,
-  Param, Toggle, ParamConstraintGroup, NavPanel,
+  Param, Toggle, ParamConstraintGroup, NavPanel, LoadingOverlay,
 } from './components.js'
 
 const USE_DC_DEFAULT = true
 
 const P = {
-  resolution: new Param({ label: 'resolution', min: 4, max: 200, step: 1, value: 120, asInt: true, onChange: set_particle_resolution }),
+  resolution: new Param({ label: 'resolution', min: 4, max: 200, step: 1, value: 120, asInt: true, onChange: set_particle_resolution,
+                          overlayLabel: v => `Rebuilding mesh (resolution ${v})…` }),
 
   timeStep: new Param({ label: 'time step', min: 0.0005, max: 0.05, step: 0.0005, value: 0.005, onChange: set_time_step }),
   substeps: new Param({ label: 'substeps',  min: 1, max: 80, step: 1, value: 5, asInt: true, onChange: set_num_substeps }),
@@ -66,7 +67,10 @@ function buildPanel() {
   title.textContent = 'Cloth on Head'
   panel.appendChild(title)
 
-  panel.appendChild(Button({ label: 'reset sim', onClick: () => P.resolution.apply() }))
+  panel.appendChild(Button({
+    label: 'reset sim',
+    onClick: () => LoadingOverlay.withLoading('Rebuilding mesh…', () => P.resolution.apply()),
+  }))
 
   panel.appendChild(P.resolution.slider())
   panel.appendChild(Divider())
@@ -102,7 +106,7 @@ init().then(async () => {
 
   let objText
   try {
-    objText = await loadObj('/assets/male_head1.obj')
+    objText = await LoadingOverlay.withLoading('Loading head mesh…', () => loadObj('/assets/male_head1.obj'))
   } catch (e) {
     console.error('failed to load head OBJ:', e)
     return
@@ -111,7 +115,7 @@ init().then(async () => {
   buildPanel()
   NavPanel()
   try {
-    await run_head_cloth('canvas', objText)
+    await LoadingOverlay.withLoading('Initializing simulation…', () => run_head_cloth('canvas', objText))
   } catch (e) {
     console.error('run_head_cloth() failed:', e)
   }
