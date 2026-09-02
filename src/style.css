@@ -62,3 +62,30 @@ canvas {
 @keyframes loading-spin {
   to { transform: rotate(360deg); }
 }
+
+/*
+ * #sim-console — verbose paper-sim trace overlay. Non-interactive; auto-scrolls
+ * forever. Move / resize it by overriding the four custom properties below.
+ */
+#sim-console {
+  position: fixed;
+  top: var(--sim-console-top, 60vh);
+  left: var(--sim-console-left, 30%);
+  transform: translateX(-50%);
+  width: var(--sim-console-width, 100ch);
+  height: var(--sim-console-height, 100vh);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 40;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.0);
+  color: rgba(255, 255, 255, 0.2);
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+#sim-console pre {
+  margin: 0;
+  font: inherit;
+}

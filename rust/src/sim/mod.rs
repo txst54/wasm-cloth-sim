@@ -2,6 +2,7 @@ pub mod shared;
 pub mod traits;
 pub mod cloth_sim;
 pub mod paper_sim;
+pub mod trace;
 pub mod rigid_sim;
 pub mod crease;
 pub mod particle_hash;
