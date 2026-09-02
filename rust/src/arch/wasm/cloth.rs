@@ -66,24 +66,50 @@ impl AttrVertex {
 // One entry per line-list vertex. `vidx` indexes into the GPU position buffer
 // (`array<vec4<f32>>`), which the wireframe vertex shader fetches at draw time
 // — that way the wireframe always reflects live GPU positions without any CPU
-// readback. `color` is per line vertex so each edge can carry its own color
-// (mountain/valley/regular) even though edges share mesh vertices.
+// readback. `kind` classifies the edge (0 = regular, 1 = mountain, 2 = valley)
+// so the vertex shader can look its color up in the `WireframeColors` uniform;
+// this keeps the palette runtime-tunable without rebuilding the vertex buffer.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct WireframeVertex {
-    color: [f32; 3],
-    vidx:  u32,
+    kind: u32,
+    vidx: u32,
 }
+
+// Edge-kind tags stored in `WireframeVertex::kind`.
+const WF_KIND_REGULAR:  u32 = 0;
+const WF_KIND_MOUNTAIN: u32 = 1;
+const WF_KIND_VALLEY:   u32 = 2;
 
 impl WireframeVertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<WireframeVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,
+            0 => Uint32,
             1 => Uint32,
         ],
     };
+}
+
+// Runtime-tunable wireframe palette. `vec4` slots keep the 16-byte alignment
+// WGSL uniforms require; the `w` component is unused.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct WireframeColors {
+    pub regular:  [f32; 4],
+    pub mountain: [f32; 4],
+    pub valley:   [f32; 4],
+}
+
+impl Default for WireframeColors {
+    fn default() -> Self {
+        Self {
+            regular:  [0.25, 0.25, 0.25, 1.0],
+            mountain: [0.9,  0.1,  0.1,  1.0],
+            valley:   [0.1,  0.3,  1.0,  1.0],
+        }
+    }
 }
 
 const WIREFRAME_SHADER: &str = r#"
@@ -95,9 +121,16 @@ struct CameraUniform {
 }
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
 
+struct WireframeColors {
+    regular:  vec4<f32>,
+    mountain: vec4<f32>,
+    valley:   vec4<f32>,
+}
+@group(2) @binding(0) var<uniform> wf_colors: WireframeColors;
+
 struct WireframeIn {
-    @location(0) color: vec3<f32>,
-    @location(1) vidx:  u32,
+    @location(0) kind: u32,
+    @location(1) vidx: u32,
 }
 
 struct WireframeOut {
@@ -110,7 +143,13 @@ fn vs_main(in: WireframeIn) -> WireframeOut {
     let p = positions[in.vidx].xyz;
     var out: WireframeOut;
     out.clip_position = camera.view_proj * vec4<f32>(p, 1.0);
-    out.color = in.color;
+    var c = wf_colors.regular.rgb;
+    if (in.kind == 1u) {
+        c = wf_colors.mountain.rgb;
+    } else if (in.kind == 2u) {
+        c = wf_colors.valley.rgb;
+    }
+    out.color = c;
     return out;
 }
 
@@ -577,6 +616,36 @@ fn build_material_resources(
     (buffer, bgl, bg)
 }
 
+fn build_wireframe_colors_resources(
+    ctx: &GpuContext,
+    colors: WireframeColors,
+) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Wireframe Colors UB"),
+        contents: bytemuck::bytes_of(&colors),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Wireframe Colors BGL"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Wireframe Colors BG"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+    });
+    (buffer, bgl, bg)
+}
+
 pub struct Cloth {
     pub resolution: u32,
     pub positions: Vec<[f32; 3]>,
@@ -593,7 +662,11 @@ pub struct Cloth {
     wireframe_vertex_buffer: wgpu::Buffer,
     wireframe_vertex_count: u32,
     wireframe_positions_bind_group: wgpu::BindGroup,
+    wireframe_colors_buffer: wgpu::Buffer,
+    wireframe_colors_bind_group: wgpu::BindGroup,
+    pub wireframe_colors: WireframeColors,
     pub wireframe_enabled: bool,
+    pub surface_enabled: bool,
     material_buffer: wgpu::Buffer,
     material_bind_group: wgpu::BindGroup,
     pub material: Material,
@@ -671,18 +744,17 @@ impl Cloth {
 
         let shadow_pipeline = build_shadow_pipeline(ctx, &lighting.shadow_bind_group_layout);
 
-        let gray = [0.2f32, 0.2, 0.2];
         let mut wireframe_verts: Vec<WireframeVertex> = Vec::new();
         for row in 0..n {
             for col in 0..n {
                 let v = (row * n + col) as u32;
                 if col < n - 1 {
-                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v });
-                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v + 1 });
+                    wireframe_verts.push(WireframeVertex { kind: WF_KIND_REGULAR, vidx: v });
+                    wireframe_verts.push(WireframeVertex { kind: WF_KIND_REGULAR, vidx: v + 1 });
                 }
                 if row < n - 1 {
-                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v });
-                    wireframe_verts.push(WireframeVertex { color: gray, vidx: v + n as u32 });
+                    wireframe_verts.push(WireframeVertex { kind: WF_KIND_REGULAR, vidx: v });
+                    wireframe_verts.push(WireframeVertex { kind: WF_KIND_REGULAR, vidx: v + n as u32 });
                 }
             }
         }
@@ -704,11 +776,16 @@ impl Cloth {
             }],
         });
 
+        let wf_colors = WireframeColors::default();
+        let (wireframe_colors_buffer, wf_colors_bgl, wireframe_colors_bind_group) =
+            build_wireframe_colors_resources(ctx, wf_colors);
+
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
             .bind_group_layout(&wf_pos_bgl)
             .bind_group_layout(&camera_bgl)
+            .bind_group_layout(&wf_colors_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
             .build();
@@ -725,7 +802,9 @@ impl Cloth {
             index_buffer, index_count, num_verts,
             wireframe_pipeline, wireframe_vertex_buffer, wireframe_vertex_count,
             wireframe_positions_bind_group,
+            wireframe_colors_buffer, wireframe_colors_bind_group, wireframe_colors: wf_colors,
             wireframe_enabled: false,
+            surface_enabled: true,
             material_buffer, material_bind_group, material: Material::Cloth,
             normals,
         }
@@ -800,14 +879,14 @@ impl Cloth {
 
         let wireframe_verts: Vec<WireframeVertex> = edge_set.iter()
             .flat_map(|&(a, b)| {
-                let color = match edge_types.get(&(a, b)) {
-                    Some(CreaseType::Mountain) => [0.9, 0.1, 0.1],
-                    Some(CreaseType::Valley)   => [0.1, 0.3, 1.0],
-                    _ => [0.25, 0.25, 0.25],
+                let kind = match edge_types.get(&(a, b)) {
+                    Some(CreaseType::Mountain) => WF_KIND_MOUNTAIN,
+                    Some(CreaseType::Valley)   => WF_KIND_VALLEY,
+                    _ => WF_KIND_REGULAR,
                 };
                 [
-                    WireframeVertex { color, vidx: a },
-                    WireframeVertex { color, vidx: b },
+                    WireframeVertex { kind, vidx: a },
+                    WireframeVertex { kind, vidx: b },
                 ]
             })
             .collect();
@@ -829,11 +908,16 @@ impl Cloth {
             }],
         });
 
+        let wf_colors = WireframeColors::default();
+        let (wireframe_colors_buffer, wf_colors_bgl, wireframe_colors_bind_group) =
+            build_wireframe_colors_resources(ctx, wf_colors);
+
         let wireframe_pipeline = PipelineBuilder::new(&ctx.device, ctx.config.format)
             .label("Wireframe Pipeline")
             .shader(WIREFRAME_SHADER)
             .bind_group_layout(&wf_pos_bgl)
             .bind_group_layout(&camera_bgl)
+            .bind_group_layout(&wf_colors_bgl)
             .vertex_layout(WireframeVertex::LAYOUT)
             .topology(wgpu::PrimitiveTopology::LineList)
             .build();
@@ -860,7 +944,11 @@ impl Cloth {
             wireframe_vertex_buffer,
             wireframe_vertex_count,
             wireframe_positions_bind_group,
+            wireframe_colors_buffer,
+            wireframe_colors_bind_group,
+            wireframe_colors: wf_colors,
             wireframe_enabled: false,
+            surface_enabled: true,
             material_buffer, material_bind_group, material: Material::Cloth,
             normals,
         }
@@ -870,6 +958,27 @@ impl Cloth {
         self.material = m;
         let u = MaterialUniform { kind: m as u32, _p0: 0, _p1: 0, _p2: 0 };
         ctx.queue.write_buffer(&self.material_buffer, 0, bytemuck::bytes_of(&u));
+    }
+
+    /// Overwrite the whole wireframe palette (regular / mountain / valley edge
+    /// colors) and upload it. Cheap — just a uniform write, no buffer rebuild.
+    pub fn set_wireframe_colors(&mut self, ctx: &GpuContext, colors: WireframeColors) {
+        self.wireframe_colors = colors;
+        ctx.queue.write_buffer(&self.wireframe_colors_buffer, 0, bytemuck::bytes_of(&colors));
+    }
+
+    /// Set one wireframe edge-kind color (RGB, 0..1). `kind`: 0 = regular,
+    /// 1 = mountain, 2 = valley; out-of-range values are ignored.
+    pub fn set_wireframe_color(&mut self, ctx: &GpuContext, kind: u32, rgb: [f32; 3]) {
+        let slot = match kind {
+            WF_KIND_REGULAR  => &mut self.wireframe_colors.regular,
+            WF_KIND_MOUNTAIN => &mut self.wireframe_colors.mountain,
+            WF_KIND_VALLEY   => &mut self.wireframe_colors.valley,
+            _ => return,
+        };
+        *slot = [rgb[0], rgb[1], rgb[2], 1.0];
+        let colors = self.wireframe_colors;
+        ctx.queue.write_buffer(&self.wireframe_colors_buffer, 0, bytemuck::bytes_of(&colors));
     }
 
     /// Sync positions from simulation and upload to GPU.
@@ -1029,19 +1138,22 @@ impl Cloth {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &lighting.bind_group, &[]);
-            rpass.set_bind_group(1, &camera.bind_group, &[]);
-            rpass.set_bind_group(2, &self.material_bind_group, &[]);
-            rpass.set_vertex_buffer(0, self.position_buffer.slice(..));
-            rpass.set_vertex_buffer(1, self.attr_buffer.slice(..));
-            rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..self.index_count, 0, 0..1);
+            if self.surface_enabled {
+                rpass.set_pipeline(&self.pipeline);
+                rpass.set_bind_group(0, &lighting.bind_group, &[]);
+                rpass.set_bind_group(1, &camera.bind_group, &[]);
+                rpass.set_bind_group(2, &self.material_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.position_buffer.slice(..));
+                rpass.set_vertex_buffer(1, self.attr_buffer.slice(..));
+                rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
 
             if self.wireframe_enabled {
                 rpass.set_pipeline(&self.wireframe_pipeline);
                 rpass.set_bind_group(0, &self.wireframe_positions_bind_group, &[]);
                 rpass.set_bind_group(1, &camera.bind_group, &[]);
+                rpass.set_bind_group(2, &self.wireframe_colors_bind_group, &[]);
                 rpass.set_vertex_buffer(0, self.wireframe_vertex_buffer.slice(..));
                 rpass.draw(0..self.wireframe_vertex_count, 0..1);
             }

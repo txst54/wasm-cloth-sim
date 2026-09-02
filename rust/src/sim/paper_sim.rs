@@ -4,9 +4,42 @@ use std::ops::{Deref, DerefMut};
 use nalgebra as na;
 
 use crate::params::SimParams;
-use crate::{platform_log, platform_warn, platform_log_interval};
+use crate::{platform_log, platform_warn, platform_log_interval, paper_trace};
+use super::trace::{trace_begin_frame, trace_emitting};
 use super::shared::{Positions, ClothSimCore};
 use super::crease::{CreasePattern, CreaseType, find_edges_on_creases, find_overlapping_edges};
+
+// ── trace stats (only evaluated on emitting steps) ───────────────────────────
+
+fn max_speed(v: &Positions) -> f32 {
+    let mut m = 0.0_f32;
+    for i in 0..v.nrows() {
+        m = m.max((v[(i, 0)].powi(2) + v[(i, 1)].powi(2) + v[(i, 2)].powi(2)).sqrt());
+    }
+    m
+}
+
+fn max_disp(q: &Positions, q_prev: &Positions) -> f32 {
+    let mut m = 0.0_f32;
+    for i in 0..q.nrows() {
+        let dx = q[(i, 0)] - q_prev[(i, 0)];
+        let dy = q[(i, 1)] - q_prev[(i, 1)];
+        let dz = q[(i, 2)] - q_prev[(i, 2)];
+        m = m.max((dx * dx + dy * dy + dz * dz).sqrt());
+    }
+    m
+}
+
+fn kinetic_energy(v: &Positions, w: &na::DVector<f32>) -> f32 {
+    let mut ke = 0.0_f32;
+    for i in 0..v.nrows() {
+        if w[i] > 0.0 {
+            let mass = 1.0 / w[i];
+            ke += 0.5 * mass * (v[(i, 0)].powi(2) + v[(i, 1)].powi(2) + v[(i, 2)].powi(2));
+        }
+    }
+    ke
+}
 
 // ── Fold specification ────────────────────────────────────────────────────────
 
@@ -288,6 +321,8 @@ impl PaperSim {
     }
 
     pub fn step(&mut self, params: &SimParams) {
+        trace_begin_frame();
+
         let dt = params.time_step as f32;
         let max_delta = self.fold_speed * dt;
 
@@ -315,9 +350,34 @@ impl PaperSim {
         let sub_dt = sub_params.time_step as f32;
         let cb_alpha_tilde = self.crease_bend_compliance / (sub_dt * sub_dt);
 
-        for _ in 0..n_sub {
+        if trace_emitting() {
+            paper_trace!("frame",
+                "━━━ frame  dt={:.5}s  substeps={}  iters={}  verts={}  hinges={}",
+                dt, n_sub, sub_params.constraint_iters, self.core.q.nrows(), self.hinges.len());
+            if !self.hinges.is_empty() {
+                let (mut lo, mut hi, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0_f32);
+                for h in &self.hinges {
+                    lo = lo.min(h.current_angle);
+                    hi = hi.max(h.current_angle);
+                    sum += h.current_angle;
+                }
+                let n = self.hinges.len() as f32;
+                let tgt = self.hinges[0].target_angle;
+                let pct = if tgt.abs() > 1e-6 { (sum / n / tgt * 100.0).clamp(0.0, 100.0) } else { 100.0 };
+                paper_trace!("fold",
+                    "fold   θ̄={:+.3}  θ∈[{:+.3}, {:+.3}]  → {:+.3}  ({:.0}%)",
+                    sum / n, lo, hi, tgt, pct);
+            }
+        }
+
+        for sub in 0..n_sub {
             // 1. Predict
             self.core.predict(&sub_params);
+
+            if trace_emitting() {
+                paper_trace!("predict", "sub {:>2}/{}  predict   vmax={:.4}  ke={:.3e}",
+                    sub + 1, n_sub, max_speed(&self.core.v), kinetic_energy(&self.core.v, &self.core.w));
+            }
 
             // 2. Reset all lambdas (per-substep)
             self.core.reset_lambdas();
@@ -359,6 +419,16 @@ impl PaperSim {
 
             // 5. Derive velocity from position change
             self.core.update_velocity(&sub_params);
+
+            if trace_emitting() {
+                let lam = if self.hinges.is_empty() {
+                    0.0
+                } else {
+                    self.hinges.iter().map(|h| h.lambda.abs()).sum::<f32>() / self.hinges.len() as f32
+                };
+                paper_trace!("relax", "sub {:>2}/{}  solved    Δxmax={:.5}  |λ̄|={:.3e}",
+                    sub + 1, n_sub, max_disp(&self.core.q, &self.core.q_prev), lam);
+            }
         }
         let _ = cb_alpha_tilde;
     }
@@ -456,6 +526,12 @@ pub(crate) fn apply_hinge_xpbd(
 
     platform_log_interval!(100, 1,
         "θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
+        theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
+    );
+
+    // Verbose copy for the on-page sim console (see sim::trace).
+    paper_trace!("hinge",
+        "hinge  θ={:.3} goal={:.3} c={:.4} dl={:.6} γ∇C·dx={:.4} γ={:.2e}",
         theta, goal_angle, c_val, dl, gamma * grad_dot_dx, gamma
     );
 

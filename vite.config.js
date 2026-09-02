@@ -7,6 +7,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         paper: resolve(__dirname, 'paper/index.html'),
+        paper_wireframe: resolve(__dirname, 'paper_wireframe/index.html'),
         particle: resolve(__dirname, 'particle/index.html'),
         particle_paper: resolve(__dirname, 'particle_paper/index.html'),
         head: resolve(__dirname, 'head/index.html'),
