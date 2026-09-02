@@ -1727,3 +1727,63 @@ pub struct SimCore {
     pub cloth: ClothSimCore,
     pub rigid: super::rigid_sim::RigidSimCore,
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+//
+// Only the mesh-topology invariants the paper simulation's hinge system relies
+// on. Broader `ClothSimCore` coverage lands with the other sims.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::paper_sim::dihedral_angle;
+
+    #[test]
+    fn flat_grid_quad_yields_one_zero_dihedral_diamond() {
+        let core = ClothSimCore::from_grid(2, &[]);
+        assert_eq!(core.diamonds.len(), 1);
+        let [a, b, c, d] = core.diamonds[0];
+        let theta = dihedral_angle(&core.q, a, b, c, d);
+        assert!(theta.abs() < 1e-5, "flat diamond dihedral {theta}");
+    }
+
+    #[test]
+    fn every_grid_diamond_is_flat_at_rest() {
+        let core = ClothSimCore::from_grid(6, &[]);
+        for &[a, b, c, d] in &core.diamonds {
+            assert!(dihedral_angle(&core.q, a, b, c, d).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn diamond_count_equals_interior_edge_count() {
+        for n in [3usize, 5, 8] {
+            let core = ClothSimCore::from_grid(n, &[]);
+            // perimeter edges (4*(n-1)) belong to a single triangle; the rest
+            // are shared and become diamonds.
+            assert_eq!(core.diamonds.len(), core.edges.len() - 4 * (n - 1), "n={n}");
+        }
+    }
+
+    #[test]
+    fn build_edges_deduplicates_shared_edges() {
+        let core = ClothSimCore::from_grid(4, &[]);
+        let mut seen = HashSet::new();
+        for &[a, b] in &core.edges {
+            let key = if a < b { (a, b) } else { (b, a) };
+            assert!(seen.insert(key), "duplicate edge {key:?}");
+        }
+    }
+
+    #[test]
+    fn vertex_neighbors_are_symmetric() {
+        let core = ClothSimCore::from_grid(5, &[]);
+        for v in 0..core.q.nrows() {
+            for &nb in &core.vertex_neighbors[v] {
+                assert!(
+                    core.vertex_neighbors[nb as usize].contains(&(v as u32)),
+                    "neighbor relation {v}->{nb} not mirrored"
+                );
+            }
+        }
+    }
+}

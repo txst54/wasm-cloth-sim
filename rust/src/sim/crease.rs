@@ -957,4 +957,69 @@ mod tests {
         assert_eq!(cp.lines[1].crease_type, CreaseType::Mountain);
         assert_eq!(cp.lines[2].crease_type, CreaseType::Valley);
     }
+
+    #[test]
+    fn test_parse_skips_blank_and_short_lines() {
+        let data = "\n1 0 0 100 0\n\n   \n2 50 0 50\n3 25 50 75 50\n";
+        let cp = CreasePattern::parse(data).unwrap();
+        assert_eq!(cp.lines.len(), 2); // the 4-field line is dropped
+        assert_eq!(cp.lines[0].crease_type, CreaseType::Boundary);
+        assert_eq!(cp.lines[1].crease_type, CreaseType::Valley);
+    }
+
+    #[test]
+    fn test_parse_rejects_non_numeric_fields() {
+        assert!(CreasePattern::parse("x 0 0 1 1").is_err());
+        assert!(CreasePattern::parse("1 zero 0 1 1").is_err());
+    }
+
+    #[test]
+    fn test_parse_skips_unknown_type_ids() {
+        let cp = CreasePattern::parse("9 0 0 1 1\n2 0 0 1 1").unwrap();
+        assert_eq!(cp.lines.len(), 1);
+        assert_eq!(cp.lines[0].crease_type, CreaseType::Mountain);
+    }
+
+    #[test]
+    fn test_parse_empty_or_all_skipped_is_err() {
+        assert!(CreasePattern::parse("").is_err());
+        assert!(CreasePattern::parse("9 0 0 1 1").is_err());
+    }
+
+    #[test]
+    fn test_parse_computes_bounding_box() {
+        let cp = CreasePattern::parse("1 0 0 10 20").unwrap();
+        assert_eq!(cp.bounds, ([0.0, 0.0], [10.0, 20.0]));
+    }
+
+    #[test]
+    fn test_build_mesh_basic_invariants() {
+        let data = "1 0 0 100 0\n1 100 0 100 100\n1 100 100 0 100\n1 0 100 0 0\n2 0 50 100 50";
+        let cp = CreasePattern::parse(data).unwrap();
+        let (positions, faces, fold_edges, crease_chains, _split) = cp.build_mesh(10);
+
+        assert!(!positions.is_empty());
+        assert!(!faces.is_empty());
+
+        for &[x, y, z] in &positions {
+            assert!((-0.9 - 1e-3..=0.9 + 1e-3).contains(&x), "x={x}");
+            assert!((-0.9 - 1e-3..=0.9 + 1e-3).contains(&y), "y={y}");
+            assert!(z.abs() < 1e-6, "z={z}");
+        }
+
+        let n = positions.len() as u32;
+        for &[a, b, c] in &faces {
+            assert!(a < n && b < n && c < n);
+            assert!(a != b && b != c && a != c, "degenerate face [{a},{b},{c}]");
+        }
+
+        assert!(fold_edges.values().any(|&t| t == CreaseType::Mountain));
+
+        for chain in &crease_chains {
+            assert!(chain.len() >= 2);
+            for w in chain.windows(2) {
+                assert_ne!(w[0], w[1], "repeated vertex in crease chain");
+            }
+        }
+    }
 }
